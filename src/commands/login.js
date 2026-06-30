@@ -44,6 +44,94 @@ async function loginDeepseek(provider) {
   }
 }
 
+async function loginQwen(provider) {
+  // 显示已有账号
+  const existing = provider.listAccounts();
+  if (existing.length > 0) {
+    printInfo(`当前已有 ${chalk.bold(existing.length)} 个 Qwen 账号:`);
+    for (const a of existing) {
+      process.stdout.write(chalk.gray(`  - ${a.displayName}\n`));
+    }
+    process.stdout.write("\n");
+  }
+
+  // 选择登录方式
+  const { loginType } = await inquirer.prompt([{
+    type: "list",
+    name: "loginType",
+    message: "选择登录方式:",
+    choices: [
+      { name: "邮箱 + 密码登录（推荐）", value: "password" },
+      { name: "手动输入 Bearer Token", value: "token" },
+    ]
+  }]);
+
+  if (loginType === "token") {
+    process.stdout.write(chalk.gray("如何获取 Bearer Token:\n"));
+    process.stdout.write(chalk.gray("  1. 浏览器打开 https://chat.qwen.ai 并登录\n"));
+    process.stdout.write(chalk.gray("  2. 打开开发者工具 (F12) → Application → Local Storage\n"));
+    process.stdout.write(chalk.gray("  3. 查找 key 为 'token' 的项\n\n"));
+
+    const answers = await inquirer.prompt([
+      {
+        type: "password",
+        name: "token",
+        message: "Bearer Token:",
+        mask: "*",
+        validate: (v) => v.trim().length > 0 ? true : "Token 不能为空"
+      },
+      {
+        type: "input",
+        name: "email",
+        message: "备注（如邮箱，可选）:",
+        default: ""
+      }
+    ]);
+
+    const spinner = ora("正在验证 Qwen token...").start();
+    try {
+      const account = await provider.login(answers);
+      spinner.succeed("登录成功");
+
+      const total = provider.listAccounts().length;
+      printSuccess(`已登录: ${chalk.bold(account.displayName)} (共 ${total} 个账号)`);
+    } catch (err) {
+      spinner.fail("登录失败");
+      printError(err.message);
+    }
+    return;
+  }
+
+  // 邮箱 + 密码登录
+  const answers = await inquirer.prompt([
+    {
+      type: "input",
+      name: "email",
+      message: "邮箱:",
+      validate: (v) => v.trim().includes("@") ? true : "请输入有效邮箱"
+    },
+    {
+      type: "password",
+      name: "password",
+      message: "密码:",
+      mask: "*",
+      validate: (v) => v.length > 0 ? true : "密码不能为空"
+    }
+  ]);
+
+  const spinner = ora("正在登录 Qwen...").start();
+  try {
+    const account = await provider.login(answers);
+    spinner.succeed("登录成功");
+
+    const total = provider.listAccounts().length;
+    printSuccess(`已登录: ${chalk.bold(account.displayName)} (共 ${total} 个账号)`);
+  } catch (err) {
+    spinner.fail("登录失败");
+    printError(err.message);
+  }
+}
+
 async function loginOpenAI(provider) {
   const answers = await inquirer.prompt([
     {
@@ -91,6 +179,8 @@ export async function runLogin() {
     await loginDeepseek(provider);
   } else if (providerName === "openai") {
     await loginOpenAI(provider);
+  } else if (providerName === "qwen") {
+    await loginQwen(provider);
   } else {
     printError(`未知的服务商: ${providerName}`);
   }

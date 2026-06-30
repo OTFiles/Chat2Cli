@@ -212,10 +212,27 @@ async function continueDsSession(sessionId) {
   const account = await selectDsAccount(provider);
   if (!account) { printError("没有 DeepSeek 账号"); return; }
 
+  // 先获取会话列表，用前缀匹配找到完整 UUID
+  let listSpinner = ora("正在查找会话...").start();
+  let fullSessionId;
+  try {
+    const { sessions } = await provider.fetchSessions(account.id);
+    const match = sessions.find((s) => s.id.startsWith(sessionId));
+    if (!match) {
+      listSpinner.fail(`未找到匹配的会话: ${sessionId}`);
+      return;
+    }
+    fullSessionId = match.id;
+    listSpinner.succeed(`找到会话: ${chalk.bold(match.title || fullSessionId.slice(0, 12))}`);
+  } catch (err) {
+    listSpinner.fail(err.message);
+    return;
+  }
+
   const spinner = ora("正在获取会话消息...").start();
   let dsMessages;
   try {
-    dsMessages = await provider.fetchMessages(account.id, sessionId);
+    dsMessages = await provider.fetchMessages(account.id, fullSessionId);
     spinner.succeed("已加载");
   } catch (err) {
     spinner.fail(err.message);
@@ -224,7 +241,7 @@ async function continueDsSession(sessionId) {
 
   if (!dsMessages.length) { printWarn("该会话无消息记录"); return; }
 
-  printSuccess(`继续云端会话: ${chalk.bold(sessionId.slice(0, 12))}\n`);
+  printSuccess(`继续云端会话: ${chalk.bold(fullSessionId.slice(0, 12))}\n`);
 
   // 回显已有消息
   for (const msg of dsMessages) {
@@ -252,7 +269,7 @@ async function continueDsSession(sessionId) {
       let thinking = "", response = "", firstChunk = true;
 
       try {
-        for await (const delta of provider.continueSession(account.id, sessionId, currentModel, messages)) {
+        for await (const delta of provider.continueSession(account.id, fullSessionId, currentModel, messages)) {
           if (firstChunk) { s.stop(); process.stdout.write(chalk.green("AI: ")); firstChunk = false; }
           if (delta.kind === "thinking") { thinking += delta.text; printAiContent(delta.text, true); }
           else { response += delta.text; printAiContent(delta.text, false); }
@@ -281,12 +298,29 @@ async function deleteDsSession(sessionId) {
   const account = await selectDsAccount(provider);
   if (!account) return;
 
-  const { confirm } = await inquirer.prompt([{ type: "confirm", name: "confirm", message: `确定从云端删除会话 ${sessionId.slice(0, 12)}... 吗？`, default: false }]);
+  // 先用前缀匹配找到完整 UUID
+  let listSpinner = ora("正在查找会话...").start();
+  let fullSessionId;
+  try {
+    const { sessions } = await provider.fetchSessions(account.id);
+    const match = sessions.find((s) => s.id.startsWith(sessionId));
+    if (!match) {
+      listSpinner.fail(`未找到匹配的会话: ${sessionId}`);
+      return;
+    }
+    fullSessionId = match.id;
+    listSpinner.succeed(`找到会话: ${chalk.bold(match.title || fullSessionId.slice(0, 12))}`);
+  } catch (err) {
+    listSpinner.fail(err.message);
+    return;
+  }
+
+  const { confirm } = await inquirer.prompt([{ type: "confirm", name: "confirm", message: `确定从云端删除会话 ${fullSessionId.slice(0, 12)}... 吗？`, default: false }]);
   if (!confirm) { printInfo("已取消。"); return; }
 
   const spinner = ora("正在删除...").start();
   try {
-    await provider.deleteSession(account.id, sessionId);
+    await provider.deleteSession(account.id, fullSessionId);
     spinner.succeed("已删除");
   } catch (err) {
     spinner.fail(err.message);

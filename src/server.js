@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
-import { initProviders, getProvider } from "./providers/registry.js";
+import { initProviders, getProvider, listProviders } from "./providers/registry.js";
 import { getStore } from "./storage/store.js";
 import { getConfig } from "./config.js";
-import { streamOpenAiResponse, collectOpenAiResponse, buildOpenAiPrompt } from "./bridge.js";
+import { streamOpenAiResponse, collectOpenAiResponse, streamQwenOpenAiResponse, collectQwenOpenAiResponse, buildOpenAiPrompt } from "./bridge.js";
 
 // 通过 API Key 查找对应的服务商账号
 function resolveApiKey(apiKey) {
@@ -56,10 +56,16 @@ function getBearerToken(req) {
 }
 
 async function handleModels(res) {
-  const provider = getProvider("deepseek");
-  const models = provider?.getModels().map((m) => ({
-    id: m.id, object: "model", created: 0, owned_by: "deepseek"
-  })) || [];
+  const providers = listProviders();
+  const models = [];
+  for (const provider of providers) {
+    if (typeof provider.getModels === "function") {
+      const ownedBy = provider.name;
+      for (const m of provider.getModels()) {
+        models.push({ id: m.id, object: "model", created: 0, owned_by: ownedBy });
+      }
+    }
+  }
   sendJson(res, 200, { object: "list", data: models });
 }
 
@@ -73,7 +79,7 @@ async function handleChatCompletions(req, res) {
 
   if (!accountId) {
     return sendError(res, 403,
-      "此 API Key 未绑定 DeepSeek 账号，请运行: chat2cli apikey bind <keyId>");
+      `此 API Key 未绑定 ${provider.label} 账号，请运行: chat2cli apikey bind <keyId>`);
   }
 
   let body;
@@ -112,14 +118,21 @@ async function handleChatCompletions(req, res) {
     // 通过 provider 发起 completion，获取原始 Response
     const dsResponse = await provider.startCompletion(body.messages, providerOptions);
 
+    const isQwen = provider.name === "qwen";
     if (!dsResponse || !dsResponse.ok) {
-      return sendError(res, 502, "DeepSeek 请求失败");
+      return sendError(res, 502, `${provider.label} 请求失败`);
     }
 
     if (streaming) {
-      await streamOpenAiResponse({ bodyStream: dsResponse.body, model, response: res, toolNames });
+      if (isQwen) {
+        await streamQwenOpenAiResponse({ bodyStream: dsResponse.body, model, response: res, toolNames });
+      } else {
+        await streamOpenAiResponse({ bodyStream: dsResponse.body, model, response: res, toolNames });
+      }
     } else {
-      const result = await collectOpenAiResponse({ bodyStream: dsResponse.body, model, toolNames });
+      const result = isQwen
+        ? await collectQwenOpenAiResponse({ bodyStream: dsResponse.body, model, toolNames })
+        : await collectOpenAiResponse({ bodyStream: dsResponse.body, model, toolNames });
       sendJson(res, 200, result);
     }
   } catch (err) {

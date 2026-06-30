@@ -33,15 +33,33 @@ export async function runApiKey(action, ...args) {
   }
 }
 
-// ── 获取可用的 DeepSeek 账号列表 ──
+// ── 获取可用的账号列表 ──
 
 function getAvailableAccounts() {
   const state = getStore();
-  const accounts = state.providers?.deepseek?.accounts || [];
-  return accounts.map((a) => ({
-    name: `${a.displayName || a.loginValue} (${a.emailMasked || a.mobileMasked || a.loginValue})`,
-    value: a.id
-  }));
+  const results = [];
+
+  // DeepSeek 账号
+  const dsAccounts = state.providers?.deepseek?.accounts || [];
+  for (const a of dsAccounts) {
+    results.push({
+      provider: "deepseek",
+      name: `${a.displayName || a.loginValue} (${a.emailMasked || a.mobileMasked || a.loginValue})`,
+      value: a.id
+    });
+  }
+
+  // Qwen 账号
+  const qwAccounts = state.providers?.qwen?.accounts || [];
+  for (const a of qwAccounts) {
+    results.push({
+      provider: "qwen",
+      name: `${a.displayName} [Qwen]`,
+      value: a.id
+    });
+  }
+
+  return results;
 }
 
 // ── 选择 API Key（交互式）──
@@ -83,6 +101,9 @@ async function createKey() {
   if (state.providers?.openai?.apiKey) {
     providerNames.push({ name: "OpenAI", value: "openai" });
   }
+  if (state.providers?.qwen?.accounts?.length > 0) {
+    providerNames.push({ name: "Qwen (通义千问)", value: "qwen" });
+  }
 
   if (!providerNames.length) {
     printError("没有已登录的服务商，请先运行 chat2cli login");
@@ -107,23 +128,29 @@ async function createKey() {
       name: "bindNow",
       message: "是否立即绑定到此服务商的账号?",
       default: true
+    },
+    {
+      type: "input",
+      name: "customKey",
+      message: "自定义 Key（留空自动生成，以 sk- 或 dsr_ 等开头）:",
+      default: ""
     }
   ]);
 
   let accountId = null;
 
   if (answers.bindNow) {
-    if (answers.provider === "deepseek") {
-      const accounts = getAvailableAccounts();
+    if (answers.provider === "deepseek" || answers.provider === "qwen") {
+      const accounts = getAvailableAccounts().filter((a) => a.provider === answers.provider);
       if (accounts.length === 0) {
-        printWarn("没有可用的 DeepSeek 账号（请先登录）");
+        printWarn(`没有可用的 ${answers.provider} 账号（请先登录）`);
       } else if (accounts.length === 1) {
         accountId = accounts[0].value;
       } else {
         const accAns = await inquirer.prompt([{
           type: "list",
           name: "accountId",
-          message: "选择要绑定的 DeepSeek 账号:",
+          message: `选择要绑定的 ${answers.provider} 账号:`,
           choices: accounts
         }]);
         accountId = accAns.accountId;
@@ -132,7 +159,7 @@ async function createKey() {
     // OpenAI 暂不需要多账号绑定
   }
 
-  const keyValue = generateApiKey();
+  const keyValue = answers.customKey.trim() || generateApiKey();
 
   updateStore((state) => ({
     ...state,

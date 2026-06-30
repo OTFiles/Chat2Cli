@@ -36,8 +36,13 @@ async function maybeRefreshAccount(response, account) {
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) return { refreshedAccount: account, response };
   const buffer = Buffer.from(await response.arrayBuffer());
-  const payloadText = buffer.toString("utf8");
-  const payload = contentType.includes("application/json") ? JSON.parse(payloadText) : null;
+  const payloadText = buffer.toString("utf8").trim();
+
+  // 空响应或非 JSON 响应不触发 token 刷新（HttpError 由调用方处理）
+  let payload = null;
+  if (contentType.includes("application/json") && payloadText) {
+    try { payload = JSON.parse(payloadText); } catch { /* ignore malformed JSON */ }
+  }
   const shouldRefresh = payload?.code === 40002 || payload?.code === 40003;
   if (!shouldRefresh) return { refreshedAccount: account, response: new Response(buffer, { headers: response.headers, status: response.status }) };
   const refreshedAccount = await refreshAccountToken(account);
@@ -60,7 +65,25 @@ export async function proxyDeepseekRequest(options) {
 const JSON_HEADERS = Object.freeze({ "content-type": "application/json" });
 
 async function readPayload(response) {
-  const p = await response.json();
+  // 先尝试获取原始文本，避免 JSON 解析空 body 时报 "Unexpected end of JSON input"
+  let text;
+  try { text = await response.text(); } catch { text = ""; }
+  if (!text || !text.trim()) {
+    throw new Error(`DeepSeek 返回空响应 (HTTP ${response.status})`);
+  }
+  if (!response.ok) {
+    // 尝试解析错误消息
+    try {
+      const errPayload = JSON.parse(text);
+      const msg = errPayload?.data?.biz_msg || errPayload?.msg || errPayload?.message || JSON.stringify(errPayload).slice(0, 200);
+      throw new Error(`DeepSeek 请求失败 HTTP ${response.status}: ${msg}`);
+    } catch (e) {
+      if (e.message.includes("DeepSeek")) throw e;
+      throw new Error(`DeepSeek 请求失败 HTTP ${response.status}: ${text.slice(0, 200)}`);
+    }
+  }
+  let p;
+  try { p = JSON.parse(text); } catch { throw new Error(`DeepSeek 响应解析失败: ${text.slice(0, 200)}`); }
   if (p.data?.biz_code !== 0) {
     throw new Error(p.data?.biz_msg || p.msg || `DeepSeek 请求失败 (biz_code=${p.data?.biz_code})`);
   }
@@ -113,16 +136,30 @@ export async function fetchSessionPage(account) {
 
 /**
  * 获取某个 DS 会话的历史消息
+ * 使用 GET /api/v0/chat/history_messages?chat_session_id=xxx
  */
 export async function fetchSessionMessages(account, chatSessionId) {
   const path = "/api/v0/chat/history_messages";
   const { response } = await proxyDeepseekRequest({
-    account, method: "POST", path,
-    body: Buffer.from(JSON.stringify({ chat_session_id: chatSessionId })),
+    account, method: "GET", path,
+    query: { chat_session_id: chatSessionId },
     headers: JSON_HEADERS
   });
   const p = await readPayload(response);
-  const msgs = p.data?.biz_data || [];
+  const bizData = p.data?.biz_data;
+
+  // biz_data 可能是数组 [{...}, {...}] 或对象 { messages: [...] }
+  let msgs;
+  if (Array.isArray(bizData)) {
+    msgs = bizData;
+  } else if (bizData && Array.isArray(bizData.messages)) {
+    msgs = bizData.messages;
+  } else if (bizData && Array.isArray(bizData.list)) {
+    msgs = bizData.list;
+  } else {
+    msgs = [];
+  }
+
   return msgs.map((m) => ({
     role: m.role === "USER" ? "user" : "assistant",
     content: m.content || "",

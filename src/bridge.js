@@ -137,6 +137,67 @@ export async function* consumeRawStream(bodyStream) {
 }
 
 // ═══════════════════════════════════════════════════
+//  Qwen SSE 解码器和流消费
+// ═══════════════════════════════════════════════════
+
+/**
+ * 将 Qwen SSE 数据行（choices[0].delta）解析为 { kind, text } delta。
+ * - reasoning_content → { kind: "thinking", text }
+ * - content → { kind: "response", text }
+ */
+export function createQwenDeltaDecoder() {
+  return {
+    consume(jsonStr) {
+      try {
+        const obj = JSON.parse(jsonStr);
+        const choice = obj?.choices?.[0];
+        if (!choice) return null;
+        const delta = choice.delta;
+        if (!delta) return null;
+
+        if (delta.reasoning_content) {
+          return { kind: "thinking", text: delta.reasoning_content };
+        }
+        if (delta.content) {
+          return { kind: "response", text: delta.content };
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    }
+  };
+}
+
+/**
+ * 消费 Qwen 的 SSE 流，在 thinking / response 切换时插入 <think> 标签。
+ */
+export async function consumeQwenStream(bodyStream, onText) {
+  if (!bodyStream) return;
+
+  const decoder = new TextDecoder();
+  const deltaDecoder = createQwenDeltaDecoder();
+  const tagger = createThinkingTagger();
+  const parser = createSseParser(({ data }) => {
+    if (!data) return;
+    try {
+      const delta = deltaDecoder.consume(data);
+      const text = tagger.push(delta);
+      if (text) onText(text);
+    } catch {
+      // skip unparseable frames
+    }
+  });
+
+  for await (const chunk of bodyStream) {
+    parser.push(decoder.decode(chunk, { stream: true }));
+  }
+  parser.flush();
+  const suffix = tagger.flush();
+  if (suffix) onText(suffix);
+}
+
+// ═══════════════════════════════════════════════════
 //  Tool / function-call 支持
 //  参考 deepseek2api 项目的 openai-tool-prompt.js
 //  + openai-tool-parser.js + openai-tool-sieve.js
@@ -796,6 +857,119 @@ export async function collectOpenAiResponse({ bodyStream, model, toolNames = [] 
   let rawContent = "";
 
   await consumeTaggedStream(bodyStream, (text) => {
+    rawContent += text;
+  });
+
+  const hasTools = toolNames.length > 0;
+  let content = rawContent;
+  let toolCalls = [];
+
+  if (hasTools) {
+    const parsed = extractToolAwareOutput(rawContent, toolNames);
+    content = parsed.content;
+    toolCalls = parsed.toolCalls;
+  }
+
+  if (toolCalls.length > 0) {
+    return {
+      id: createCompletionId(),
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{
+        index: 0,
+        finish_reason: "tool_calls",
+        message: {
+          role: "assistant",
+          content: content.length ? content : null,
+          tool_calls: createChatToolCalls(toolCalls)
+        }
+      }]
+    };
+  }
+
+  return {
+    id: createCompletionId(),
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{
+      index: 0,
+      finish_reason: "stop",
+      message: { role: "assistant", content }
+    }]
+  };
+}
+
+// ═══════════════════════════════════════════════════
+//  Qwen 兼容的 OpenAI SSE 响应（使用 Qwen SSE 解码器）
+// ═══════════════════════════════════════════════════
+
+export async function streamQwenOpenAiResponse({ bodyStream, model, response, toolNames = [] }) {
+  const completionId = createCompletionId();
+  const hasTools = toolNames.length > 0;
+  const toolSieve = hasTools ? createToolSieve(toolNames) : null;
+  let toolCallIndex = 0;
+  let sawToolCall = false;
+
+  response.writeHead(200, {
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "content-type": "text/event-stream; charset=utf-8",
+    "x-accel-buffering": "no"
+  });
+  response.flushHeaders?.();
+
+  function writeSse(payload) {
+    response.write(`data: ${JSON.stringify(payload)}\n\n`);
+  }
+
+  writeSse(buildChunkPayload(completionId, model, { role: "assistant" }));
+
+  const emitToolCalls = (calls) => {
+    if (!calls.length) return;
+    sawToolCall = true;
+    writeSse(buildChunkPayload(completionId, model, {
+      tool_calls: createChatToolCalls(calls, toolCallIndex)
+    }));
+    toolCallIndex += calls.length;
+  };
+
+  await consumeQwenStream(bodyStream, (text) => {
+    if (!toolSieve) {
+      writeSse(buildChunkPayload(completionId, model, { content: text }));
+      return;
+    }
+
+    const events = toolSieve.push(text);
+    for (const event of events) {
+      if (event.type === "tool_calls") {
+        emitToolCalls(event.calls ?? []);
+      } else if (event.text) {
+        writeSse(buildChunkPayload(completionId, model, { content: event.text }));
+      }
+    }
+  });
+
+  if (toolSieve) {
+    const tailEvents = toolSieve.flush();
+    for (const event of tailEvents) {
+      if (event.type === "tool_calls") {
+        emitToolCalls(event.calls ?? []);
+      } else if (event.text) {
+        writeSse(buildChunkPayload(completionId, model, { content: event.text }));
+      }
+    }
+  }
+
+  writeSse(buildChunkPayload(completionId, model, {}, sawToolCall ? "tool_calls" : "stop"));
+  response.end("data: [DONE]\n\n");
+}
+
+export async function collectQwenOpenAiResponse({ bodyStream, model, toolNames = [] }) {
+  let rawContent = "";
+
+  await consumeQwenStream(bodyStream, (text) => {
     rawContent += text;
   });
 
