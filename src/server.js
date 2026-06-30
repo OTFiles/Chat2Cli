@@ -2,9 +2,9 @@ import { createServer } from "node:http";
 import { initProviders, getProvider } from "./providers/registry.js";
 import { getStore } from "./storage/store.js";
 import { getConfig } from "./config.js";
-import { streamOpenAiResponse, collectOpenAiResponse } from "./bridge.js";
+import { streamOpenAiResponse, collectOpenAiResponse, buildOpenAiPrompt } from "./bridge.js";
 
-// 通过 API Key 查找对应的服务商
+// 通过 API Key 查找对应的服务商账号
 function resolveApiKey(apiKey) {
   const state = getStore();
   const record = state.apiKeys?.find((k) => k.key === apiKey);
@@ -13,7 +13,14 @@ function resolveApiKey(apiKey) {
   const provider = getProvider(record.provider);
   if (!provider || !provider.isAuthenticated()) return null;
 
-  return { provider, record };
+  // 如果绑定了具体账号，验证账号仍存在
+  let accountId = record.accountId || null;
+  if (accountId) {
+    const account = provider.getAccountInfo(accountId);
+    if (!account) accountId = null;
+  }
+
+  return { provider, record, accountId };
 }
 
 function sendJson(res, status, body) {
@@ -62,7 +69,12 @@ async function handleChatCompletions(req, res) {
 
   const resolved = resolveApiKey(token);
   if (!resolved) return sendError(res, 401, "无效的 API Key，请运行 chat2cli apikey create 创建");
-  const { provider } = resolved;
+  const { provider, accountId } = resolved;
+
+  if (!accountId) {
+    return sendError(res, 403,
+      "此 API Key 未绑定 DeepSeek 账号，请运行: chat2cli apikey bind <keyId>");
+  }
 
   let body;
   try { body = await parseRequestBody(req); }
@@ -75,18 +87,39 @@ async function handleChatCompletions(req, res) {
   const model = body.model || getConfig().defaultModel;
   const streaming = body.stream !== false;
 
+  // 检查是否需要工具调用支持
+  const tools = body.tools || null;
+  const toolChoice = body.tool_choice;
+  const hasToolMessages = body.messages?.some(
+    (m) => m.role === "tool" || m.role === "function" || Array.isArray(m.tool_calls)
+  );
+  const needsTooling = (Array.isArray(tools) && tools.length > 0) || hasToolMessages;
+
+  let providerOptions = { model, accountId };
+  let toolNames = [];
+
+  if (needsTooling) {
+    try {
+      const openAiPrompt = buildOpenAiPrompt({ messages: body.messages, tools, toolChoice });
+      providerOptions.prompt = openAiPrompt.prompt;
+      toolNames = openAiPrompt.toolNames;
+    } catch (e) {
+      return sendError(res, 400, `工具配置错误: ${e.message}`);
+    }
+  }
+
   try {
     // 通过 provider 发起 completion，获取原始 Response
-    const dsResponse = await provider.startCompletion(body.messages, { model });
+    const dsResponse = await provider.startCompletion(body.messages, providerOptions);
 
     if (!dsResponse || !dsResponse.ok) {
       return sendError(res, 502, "DeepSeek 请求失败");
     }
 
     if (streaming) {
-      await streamOpenAiResponse({ bodyStream: dsResponse.body, model, response: res });
+      await streamOpenAiResponse({ bodyStream: dsResponse.body, model, response: res, toolNames });
     } else {
-      const result = await collectOpenAiResponse({ bodyStream: dsResponse.body, model });
+      const result = await collectOpenAiResponse({ bodyStream: dsResponse.body, model, toolNames });
       sendJson(res, 200, result);
     }
   } catch (err) {

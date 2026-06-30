@@ -96,13 +96,18 @@ export class DeepSeekProvider extends BaseProvider {
     yield* streamRawDeltas(response);
   }
 
-  /** Server 用 */
+  /** Server 用
+   *  options.prompt 可覆盖自动构建的 prompt（用于注入工具调用提示）
+   *  options.accountId 可指定使用特定 DeepSeek 账号
+   */
   async startCompletion(messages, options = {}) {
-    const account = this.getDefaultAccount();
+    const account = options.accountId
+      ? this.getAccountInfo(options.accountId)
+      : this.getDefaultAccount();
     if (!account) throw new Error("未登录 DeepSeek，请先运行 chat2cli login");
 
     const model = options.model || "deepseek-chat-fast";
-    const prompt = buildPromptFromMessages(messages);
+    const prompt = options.prompt || buildPromptFromMessages(messages);
     const sessionId = await createChatSession(account);
     const body = buildChatCompletionBody({ sessionId, prompt, model });
 

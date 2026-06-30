@@ -25,6 +25,7 @@ function normalizeApiKeys(value) {
     id: k.id || "",
     key: k.key || "",
     provider: k.provider || "",
+    accountId: k.accountId || null,
     label: k.label || "",
     toolCallsEnabled: Boolean(k.toolCallsEnabled),
     createdAt: k.createdAt || new Date().toISOString()

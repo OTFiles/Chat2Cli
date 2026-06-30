@@ -1,6 +1,6 @@
 # chat2cli
 
-> 多 AI 终端聊天工具 - 在命令行中与 DeepSeek、OpenAI 等 AI 对话
+> 多 AI 终端聊天工具 - 在命令行中与 DeepSeek、OpenAI 等 AI 对话，通过代理提供CLI对话和openai接口桥接功能。
 
 ## 功能特性
 
@@ -9,7 +9,8 @@
 - **流式输出** - 实时显示 AI 回复，支持思考过程展示
 - **云端会话同步** - 查看/继续 DeepSeek 网页端的会话历史
 - **OpenAI 兼容 API** - 启动 HTTP 服务，提供 `/v1/models` 和 `/v1/chat/completions` 接口
-- **API Key 管理** - 生成分发 API Key，不暴露原始凭据
+- **Function Calling** - API 服务支持 OpenAI 兼容的 `tools`/`tool_choice` 工具调用
+- **API Key 管理** - 生成分发 API Key，每个 Key 绑定到独立账号，不暴露原始凭据
 - **对话历史** - 自动保存本地对话，支持查看、搜索、继续、删除
 - **模型切换** - 对话中随时切换模型
 - **本地存储** - 数据保存在 `~/.chat2cli/` 目录，纯 JSON 格式
@@ -95,11 +96,15 @@ chat2cli config set defaultModel deepseek-chat-fast
 ### `chat2cli apikey` — API Key 管理
 
 ```bash
-chat2cli apikey                    # 列表
-chat2cli apikey create             # 创建（选择服务商 + 备注）
-chat2cli apikey show <id>          # 查看完整 key
+chat2cli apikey                    # 列表（含绑定状态）
+chat2cli apikey create             # 创建（选择服务商 + 备注 + 可选绑定账号）
+chat2cli apikey show <id>          # 查看完整 key 及绑定信息
+chat2cli apikey bind <id>          # 绑定 Key 到指定 DeepSeek 账号
+chat2cli apikey unbind <id>        # 解除 Key 的账号绑定
 chat2cli apikey delete <id>        # 删除
 ```
+
+**API Key → 账号 绑定关系**：每个 API Key 必须绑定到一个具体的 DeepSeek 账号才能通过 API 服务使用。未绑定的 Key 在请求时会返回 403 错误。
 
 ### `chat2cli serve` — 启动 OpenAI 兼容 API 服务
 
@@ -108,9 +113,42 @@ chat2cli serve                     # 默认 3000 端口
 chat2cli serve -p 8080             # 指定端口
 ```
 
+**前置条件**：API Key 必须先通过 `chat2cli apikey bind <id>` 绑定到 DeepSeek 账号，否则请求会返回 403。
+
 端点：
-- `GET  /v1/models`
-- `POST /v1/chat/completions`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v1/models` | 模型列表 |
+| POST | `/v1/chat/completions` | 对话补全（流式/非流式）|
+
+**工具调用 (Function Calling)**：支持 OpenAI 兼容的 `tools` 和 `tool_choice` 参数，模型会以 XML 格式输出工具调用，服务端自动解析为标准的 `tool_calls` delta 块。
+
+```bash
+# 使用示例：带工具的流式对话
+curl http://127.0.0.1:3000/v1/chat/completions \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-chat-fast",
+    "messages": [{"role": "user", "content": "北京今天天气如何？"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "查询指定城市的天气",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string", "description": "城市名称"}
+          },
+          "required": ["city"]
+        }
+      }
+    }],
+    "stream": true
+  }'
+```
 
 ## 支持的模型
 
@@ -216,6 +254,8 @@ export class MyProvider extends BaseProvider {
 - PoW 挑战求解与代理请求
 - SSE 流式响应解析
 - OpenAI 格式的协议桥接设计
+- XML 工具调用解析 (Tool Parser) 与流式拦截 (Tool Sieve)
+- Function Calling prompt 构建与消息规范化
 
 特此感谢 TQZHR 的开源贡献。
 
