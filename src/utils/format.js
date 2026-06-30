@@ -173,17 +173,9 @@ export function printChatHeader(providerLabel, model, sessionLabel) {
 export function printFooter() {
   const W = termWidth();
   process.stdout.write(chalk.dim("─".repeat(W)) + "\n");   // 上分隔线
+  process.stdout.write("\n");                               // 空白行 — 供 prompt
   process.stdout.write(chalk.dim("─".repeat(W)) + "\n");   // 下分隔线
   process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");  // 帮助提示
-}
-
-export function positionForPrompt() {
-  // printFooter 输出3行后光标在第4行。
-  // 上移2行到下分隔线处，用 \x1b[L 插入空白行（将下分隔线+帮助下推），
-  // 光标自然落在新插入的空白行上 — readline prompt 写入此处
-  process.stdout.write("\x1b[2A");       // 上移2行 → 下分隔线行
-  process.stdout.write("\x1b[L");        // Insert Line — 插入空白行
-  process.stdout.write("\r");            // 回到列0
 }
 
 // ── User message ──

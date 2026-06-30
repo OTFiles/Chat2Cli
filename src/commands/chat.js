@@ -1,4 +1,3 @@
-import { createInterface } from "node:readline";
 import chalk from "chalk";
 import { initProviders, getProvider } from "../providers/registry.js";
 import { getConfig } from "../config.js";
@@ -6,7 +5,7 @@ import { updateStore } from "../storage/store.js";
 import { createId } from "../utils/id.js";
 import {
   printSuccess, printError,
-  printChatHeader, printFooter, positionForPrompt,
+  printChatHeader, printFooter,
   printUserMsg, printThinkingLabel
 } from "../utils/format.js";
 
@@ -71,49 +70,103 @@ async function streamResponse(provider, messages, opts) {
 }
 
 async function chatLoop(provider, messages, currentModel, accountId) {
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true
-  });
-
-  let pendingResolve = null;
-  rl.on("line", (line) => {
-    if (pendingResolve) { const r = pendingResolve; pendingResolve = null; r(line); }
-  });
-  rl.on("close", () => { if (pendingResolve) pendingResolve("/exit"); });
-
-  function waitForLine() {
-    return new Promise((resolve) => { pendingResolve = resolve; rl.prompt(); });
-  }
-
-  rl.setPrompt("   > ");
-
-  function redrawFooter() {
+  // ── 绘制 footer + 定位到 prompt 行 ──
+  function drawFooter() {
     printFooter();
-    positionForPrompt();
-    rl.prompt();
+    // printFooter 输出 4 行后光标在第 5 行；上移 3 到空白 prompt 行
+    process.stdout.write("\x1b[3A\r");
+    process.stdout.write("   > ");
   }
 
-  /**
-   * 清除旧 footer。光标在下分隔线行（readline Enter 后）：
-   *   \x1b[2A → 回到上分隔线行
-   *   \x1b[J  → 清屏到末尾（覆盖上分隔线 + 提示行 + 下分隔线 + 帮助 = 4 行）
-   */
-  function clearOldFooter() {
+  // 清除旧 footer：Enter 后光标在下分隔线行，上移 2 回到上分隔线行清屏
+  function clearFooter() {
     process.stdout.write("\x1b[2A\r\x1b[J");
   }
 
+  /**
+   * raw mode 等待输入 — 手动控制回显，不依赖 readline prompt。
+   * 这样可以保证 prompt 行下方的内容（下分隔线、帮助）不被清除。
+   */
+  function waitForInput() {
+    return new Promise((resolve) => {
+      let input = "";
+      let escState = 0; // 0=normal, 1=saw ESC, 2=saw [, 3=got letter (skip)
+
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+
+      const onData = (chunk) => {
+        const str = chunk.toString("utf-8");
+        for (const char of str) {
+          const code = char.codePointAt(0);
+
+          // ESC 序列（箭头键等），跳过
+          if (escState > 0) {
+            if (escState === 2 && char === "[") { escState = 3; continue; }
+            escState--;
+            continue;
+          }
+          if (code === 27) { escState = 2; continue; }
+
+          // Enter
+          if (code === 13) {
+            process.stdout.write("\r\n");
+            process.stdin.setRawMode(false);
+            process.stdin.pause();
+            process.stdin.removeListener("data", onData);
+            resolve(input.trim());
+            return;
+          }
+          // Backspace
+          if (code === 127 || code === 8) {
+            if (input.length > 0) {
+              input = input.slice(0, -1);
+              process.stdout.write("\b \b");
+            }
+            continue;
+          }
+          // Ctrl+C → exit
+          if (code === 3) {
+            process.stdin.setRawMode(false);
+            process.stdin.pause();
+            process.stdin.removeListener("data", onData);
+            resolve("/exit");
+            return;
+          }
+          // Ctrl+D → exit (EOF)
+          if (code === 4) {
+            process.stdin.setRawMode(false);
+            process.stdin.pause();
+            process.stdin.removeListener("data", onData);
+            resolve("/exit");
+            return;
+          }
+          // 可打印字符
+          if (code >= 32 || code === 10) {
+            input += char;
+            process.stdout.write(char);
+          }
+          // 其他控制字符忽略
+        }
+      };
+
+      process.stdin.on("data", onData);
+    });
+  }
+
+  function redrawFooter() {
+    drawFooter();
+  }
+
   try {
-    // 初始显示 footer（4行：分隔线 / 空白提示行 / 分隔线 / 帮助）
-    redrawFooter();
+    // 初始显示 footer
+    drawFooter();
 
     while (true) {
-      const line = await waitForLine();
-      const input = line.trim();
+      const input = await waitForInput();
 
-      // 清除旧 footer + 输入行（共4行），为消息腾出空间
-      clearOldFooter();
+      // 清除旧 footer 全部 4 行
+      clearFooter();
 
       // ── 内置命令 ──
       if (input === "/exit") {
@@ -185,8 +238,8 @@ async function chatLoop(provider, messages, currentModel, accountId) {
       redrawFooter();
     }
   } finally {
-    rl.close();
-    await new Promise((r) => setTimeout(r, 100));
+    if (process.stdin.isRaw) process.stdin.setRawMode(false);
+    process.stdin.pause();
   }
 }
 
