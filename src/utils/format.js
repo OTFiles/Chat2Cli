@@ -189,3 +189,20 @@ export function printUserMsg(text) {
 export function printThinkingLabel() {
   process.stdout.write("   " + chalk.magenta("✻") + " " + chalk.gray("Thinking") + "\n");
 }
+
+/**
+ * 获取账号的显示标签。有 nickname 则用 nickname，
+ * 否则按手机号/邮箱脱敏展示。
+ */
+export function accountLabel(account) {
+  if (account?.nickname) return account.nickname;
+  if (!account) return "未登录";
+  const loginValue = account.loginValue || account.email || "";
+  if (/^\d{11}$/.test(loginValue)) {
+    return loginValue.replace(/^(\d{3})\d{6}(\d{2})$/, "$1******$2");
+  }
+  if (loginValue.includes("@")) {
+    return loginValue.replace(/^(.{1,3}).*(@.*)$/, "$1***$2");
+  }
+  return account.displayName || loginValue || "未命名";
+}

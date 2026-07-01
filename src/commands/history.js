@@ -3,7 +3,7 @@ import chalk from "chalk";
 import ora from "ora";
 import { initProviders, getProvider } from "../providers/registry.js";
 import { getStore, updateStore } from "../storage/store.js";
-import { printSuccess, printError, printInfo, printTable, printWarn, truncate, formatDate } from "../utils/format.js";
+import { printSuccess, printError, printInfo, printTable, printWarn, truncate, formatDate, accountLabel } from "../utils/format.js";
 import { chatLoop, echoMessages } from "../commands/chat.js";
 import { printChatHeader } from "../utils/format.js";
 
@@ -13,8 +13,8 @@ async function selectDsAccount(provider) {
   if (accounts.length === 1) return accounts[0];
 
   const { accountIndex } = await inquirer.prompt([{
-    type: "list", name: "accountIndex", message: "选择 DeepSeek 账号:",
-    choices: accounts.map((a, i) => ({ name: `${a.displayName} (${a.loginValue})`, value: i }))
+    type: "list", name: "accountIndex", message: `选择 ${provider.label} 账号:`,
+    choices: accounts.map((a, i) => ({ name: accountLabel(a), value: i }))
   }]);
   return accounts[accountIndex];
 }
@@ -192,7 +192,7 @@ async function listDsSessions(limit = 0) {
     spinner.stop();
 
     if (!sessions.length) { printInfo("该账号暂无云端会话。"); return; }
-    printInfo(`${account.displayName} 的云端会话 ${chalk.bold(sessions.length)} 条\n`);
+    printInfo(`${accountLabel(account)} 的云端会话 ${chalk.bold(sessions.length)} 条\n`);
     printTable(
       ["ID", "置顶", "标题", "更新时间"],
       sessions.map((s) => [s.id.slice(0, 16), s.pinned ? "★" : "", truncate(s.title, 30), s.updatedAt ? formatDate(typeof s.updatedAt === "number" ? new Date(s.updatedAt * 1000).toISOString() : s.updatedAt) : "-"])

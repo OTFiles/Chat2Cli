@@ -6,7 +6,7 @@ import { createId } from "../utils/id.js";
 import {
   printSuccess, printError, printInfo,
   printChatHeader, printFooter,
-  printUserMsg, printThinkingLabel
+  printUserMsg, printThinkingLabel, accountLabel
 } from "../utils/format.js";
 
 function resolveProvider() {
@@ -513,6 +513,13 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
         redrawFooter();
         continue;
       }
+      // 未知 / 命令：报错而不发送给 AI
+      if (input.startsWith("/")) {
+        process.stdout.write("   " + chalk.red("✗ ") + `未知命令: ${input.split(" ")[0]}  输入 /help 查看可用命令\n\n`);
+        redrawFooter();
+        continue;
+      }
+
       if (!input) {
         redrawFooter();
         continue;
@@ -566,7 +573,7 @@ async function runInteractiveChat(provider, opts = {}) {
       const ans = await inquirer.prompt([{
         type: "list", name: "accountIndex", message: `选择 ${provider.label} 账号:`,
         choices: accounts.map((a, i) => ({
-          name: a.displayName || a.loginValue || a.email || a.token?.slice(0, 12) + "..." || `账号 ${i + 1}`,
+          name: accountLabel(a),
           value: i
         }))
       }]);

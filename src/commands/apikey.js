@@ -2,7 +2,7 @@ import inquirer from "inquirer";
 import chalk from "chalk";
 import { getStore, updateStore } from "../storage/store.js";
 import { createId } from "../utils/id.js";
-import { printSuccess, printError, printInfo, printTable, printWarn, formatDate } from "../utils/format.js";
+import { printSuccess, printError, printInfo, printTable, printWarn, formatDate, accountLabel } from "../utils/format.js";
 
 function generateApiKey() {
   return `dsr_${Buffer.from(crypto.getRandomValues(new Uint8Array(24))).toString("base64url")}`;
@@ -44,7 +44,7 @@ function getAvailableAccounts() {
   for (const a of dsAccounts) {
     results.push({
       provider: "deepseek",
-      name: `${a.displayName || a.loginValue} (${a.emailMasked || a.mobileMasked || a.loginValue})`,
+      name: `${accountLabel(a)} [DeepSeek]`,
       value: a.id
     });
   }
@@ -54,7 +54,7 @@ function getAvailableAccounts() {
   for (const a of qwAccounts) {
     results.push({
       provider: "qwen",
-      name: `${a.displayName} [Qwen]`,
+      name: `${accountLabel(a)} [Qwen]`,
       value: a.id
     });
   }

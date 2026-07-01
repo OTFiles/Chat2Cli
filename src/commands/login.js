@@ -2,7 +2,7 @@ import inquirer from "inquirer";
 import chalk from "chalk";
 import ora from "ora";
 import { initProviders, getProvider, listProviders } from "../providers/registry.js";
-import { printSuccess, printError, printInfo } from "../utils/format.js";
+import { printSuccess, printError, printInfo, accountLabel } from "../utils/format.js";
 
 async function loginDeepseek(provider) {
   // 显示已有账号
@@ -10,7 +10,7 @@ async function loginDeepseek(provider) {
   if (existing.length > 0) {
     printInfo(`当前已有 ${chalk.bold(existing.length)} 个 DeepSeek 账号:`);
     for (const a of existing) {
-      process.stdout.write(chalk.gray(`  - ${a.displayName} (${a.loginValue})\n`));
+      process.stdout.write(chalk.gray(`  - ${accountLabel(a)}\n`));
     }
     process.stdout.write("\n");
   }
@@ -37,7 +37,7 @@ async function loginDeepseek(provider) {
     spinner.succeed("登录成功");
 
     const total = provider.listAccounts().length;
-    printSuccess(`已登录: ${chalk.bold(account.displayName)} (共 ${total} 个账号)`);
+    printSuccess(`已登录: ${chalk.bold(accountLabel(account))} (共 ${total} 个账号)`);
   } catch (err) {
     spinner.fail("登录失败");
     printError(err.message);
@@ -50,7 +50,7 @@ async function loginQwen(provider) {
   if (existing.length > 0) {
     printInfo(`当前已有 ${chalk.bold(existing.length)} 个 Qwen 账号:`);
     for (const a of existing) {
-      process.stdout.write(chalk.gray(`  - ${a.displayName}\n`));
+      process.stdout.write(chalk.gray(`  - ${accountLabel(a)}\n`));
     }
     process.stdout.write("\n");
   }
@@ -94,7 +94,7 @@ async function loginQwen(provider) {
       spinner.succeed("登录成功");
 
       const total = provider.listAccounts().length;
-      printSuccess(`已登录: ${chalk.bold(account.displayName)} (共 ${total} 个账号)`);
+      printSuccess(`已登录: ${chalk.bold(accountLabel(account))} (共 ${total} 个账号)`);
     } catch (err) {
       spinner.fail("登录失败");
       printError(err.message);
@@ -125,7 +125,7 @@ async function loginQwen(provider) {
     spinner.succeed("登录成功");
 
     const total = provider.listAccounts().length;
-    printSuccess(`已登录: ${chalk.bold(account.displayName)} (共 ${total} 个账号)`);
+    printSuccess(`已登录: ${chalk.bold(accountLabel(account))} (共 ${total} 个账号)`);
   } catch (err) {
     spinner.fail("登录失败");
     printError(err.message);
