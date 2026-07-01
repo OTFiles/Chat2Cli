@@ -1,10 +1,11 @@
 import inquirer from "inquirer";
 import chalk from "chalk";
 import ora from "ora";
-import { createInterface } from "node:readline";
 import { initProviders, getProvider } from "../providers/registry.js";
 import { getStore, updateStore } from "../storage/store.js";
-import { printSuccess, printError, printInfo, printTable, printWarn, truncate, formatDate, printAiContent } from "../utils/format.js";
+import { printSuccess, printError, printInfo, printTable, printWarn, truncate, formatDate } from "../utils/format.js";
+import { chatLoop, echoMessages } from "../commands/chat.js";
+import { printChatHeader } from "../utils/format.js";
 
 async function selectDsAccount(provider) {
   const accounts = provider.listAccounts();
@@ -18,8 +19,9 @@ async function selectDsAccount(provider) {
   return accounts[accountIndex];
 }
 
-export async function runHistory(subCommand, ...args) {
+export async function runHistory(subCommand, opts = {}, ...args) {
   initProviders();
+  const limit = Number(opts.limit) || 0;  // 0 表示使用默认值
 
   switch (subCommand) {
     case "show": await showConversation(args[0]); break;
@@ -27,9 +29,9 @@ export async function runHistory(subCommand, ...args) {
     case "continue": await continueConversation(args[0]); break;
     case "clear": await clearHistory(); break;
     case "search": await searchHistory(args.join(" ")); break;
-    case "ds": await listDsSessions(); break;
-    case "ds-continue": await continueDsSession(args[0]); break;
-    case "ds-delete": await deleteDsSession(args[0]); break;
+    case "ds": await listDsSessions(limit); break;
+    case "ds-continue": await continueDsSession(args[0], limit); break;
+    case "ds-delete": await deleteDsSession(args[0], limit); break;
     default: await listAll(); break;
   }
 }
@@ -177,7 +179,7 @@ async function searchHistory(keyword) {
 
 // --- DS 云端会话 ---
 
-async function listDsSessions() {
+async function listDsSessions(limit = 0) {
   const provider = getProvider("deepseek");
   if (!provider?.isAuthenticated()) { printError("未登录 DeepSeek"); return; }
 
@@ -186,7 +188,7 @@ async function listDsSessions() {
 
   const spinner = ora("正在获取 DeepSeek 会话列表...").start();
   try {
-    const { sessions } = await provider.fetchSessions(account.id);
+    const { sessions } = await provider.fetchSessions(account.id, limit);
     spinner.stop();
 
     if (!sessions.length) { printInfo("该账号暂无云端会话。"); return; }
@@ -203,7 +205,7 @@ async function listDsSessions() {
   }
 }
 
-async function continueDsSession(sessionId) {
+async function continueDsSession(sessionId, limit = 0) {
   if (!sessionId) { printError("请指定会话 ID"); return; }
 
   const provider = getProvider("deepseek");
@@ -216,7 +218,7 @@ async function continueDsSession(sessionId) {
   let listSpinner = ora("正在查找会话...").start();
   let fullSessionId;
   try {
-    const { sessions } = await provider.fetchSessions(account.id);
+    const { sessions } = await provider.fetchSessions(account.id, limit);
     const match = sessions.find((s) => s.id.startsWith(sessionId));
     if (!match) {
       listSpinner.fail(`未找到匹配的会话: ${sessionId}`);
@@ -230,9 +232,11 @@ async function continueDsSession(sessionId) {
   }
 
   const spinner = ora("正在获取会话消息...").start();
-  let dsMessages;
+  let dsMessages, currentMessageId;
   try {
-    dsMessages = await provider.fetchMessages(account.id, fullSessionId);
+    const result = await provider.fetchMessages(account.id, fullSessionId);
+    dsMessages = result.messages;
+    currentMessageId = result.currentMessageId;
     spinner.succeed("已加载");
   } catch (err) {
     spinner.fail(err.message);
@@ -241,55 +245,34 @@ async function continueDsSession(sessionId) {
 
   if (!dsMessages.length) { printWarn("该会话无消息记录"); return; }
 
-  printSuccess(`继续云端会话: ${chalk.bold(fullSessionId.slice(0, 12))}\n`);
-
-  // 回显已有消息
-  for (const msg of dsMessages) {
-    if (msg.role === "user") process.stdout.write(chalk.cyan("你: ") + msg.content + "\n");
-    else {
-      if (msg.thinking) process.stdout.write(chalk.gray(msg.thinking));
-      process.stdout.write(chalk.green("AI: ") + msg.content + "\n\n");
-    }
-  }
-
   const messages = [...dsMessages];
   const currentModel = "deepseek-chat-fast";
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const ask = () => new Promise((r) => rl.question(chalk.cyan("你: "), r));
+  printChatHeader(provider.label, currentModel, fullSessionId.slice(0, 8));
+  echoMessages(messages);
 
-  try {
-    while (true) {
-      const input = (await ask()).trim();
-      if (input === "/exit") { process.stdout.write(chalk.gray("再见。\n")); rl.close(); break; }
-      if (!input) continue;
+  await chatLoop(provider, messages, currentModel, account.id, fullSessionId, currentMessageId);
 
-      const s = ora("思考中...").start();
-      messages.push({ role: "user", content: input });
-      let thinking = "", response = "", firstChunk = true;
-
-      try {
-        for await (const delta of provider.continueSession(account.id, fullSessionId, currentModel, messages)) {
-          if (firstChunk) { s.stop(); process.stdout.write(chalk.green("AI: ")); firstChunk = false; }
-          if (delta.kind === "thinking") { thinking += delta.text; printAiContent(delta.text, true); }
-          else { response += delta.text; printAiContent(delta.text, false); }
-        }
-        s.stop();
-        process.stdout.write("\n\n");
-        messages.push({ role: "assistant", content: response, thinking: thinking || undefined });
-      } catch (err) {
-        s.stop();
-        process.stdout.write("\n");
-        printError(err.message);
-        messages.pop();
-      }
-    }
-  } finally {
-    rl.close();
+  // 保存到本地
+  if (messages.length > dsMessages.length) {
+    import("../utils/id.js").then(({ createId }) => {
+      const convId = createId();
+      updateStore((state) => ({
+        ...state,
+        conversations: [{
+          id: convId, provider: provider.name, model: currentModel,
+          title: messages.find((m) => m.role === "user")?.content?.slice(0, 50) || "未命名",
+          messages: [...messages],
+          accountId: account.id || "", dsSessionId: fullSessionId,
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+        }, ...state.conversations]
+      }));
+      process.stdout.write(chalk.green("✓ ") + `对话已保存\n`);
+    });
   }
 }
 
-async function deleteDsSession(sessionId) {
+async function deleteDsSession(sessionId, limit = 0) {
   if (!sessionId) { printError("请指定会话 ID"); return; }
 
   const provider = getProvider("deepseek");
@@ -302,7 +285,7 @@ async function deleteDsSession(sessionId) {
   let listSpinner = ora("正在查找会话...").start();
   let fullSessionId;
   try {
-    const { sessions } = await provider.fetchSessions(account.id);
+    const { sessions } = await provider.fetchSessions(account.id, limit);
     const match = sessions.find((s) => s.id.startsWith(sessionId));
     if (!match) {
       listSpinner.fail(`未找到匹配的会话: ${sessionId}`);

@@ -102,41 +102,58 @@ export async function deleteChatSession(account, chatSessionId) {
 }
 
 /**
- * 获取 DeepSeek 账号的会话列表页
- * 参照原项目 session-workspace.js 的调用方式：
- * GET /api/v0/chat_session/fetch_page?lte_cursor.pinned=false&lte_cursor.updated_at=xxx&count=50
+ * 获取 DeepSeek 账号的会话列表（一页）
+ * 参照 deepseek2api session-workspace.js fetchSessionsPage
+ * 使用游标分页：lte_cursor.updated_at
  */
-export async function fetchSessionPage(account) {
+export async function fetchSessionPage(account, updatedAtCursor) {
+  const now = Math.floor(Date.now() / 1000);
+  const cursor = updatedAtCursor ?? (now + 300);
   const path = "/api/v0/chat_session/fetch_page";
   const query = {
     "lte_cursor.pinned": false,
-    "lte_cursor.updated_at": Math.floor(Date.now() / 1000) + 300,
+    "lte_cursor.updated_at": cursor,
     count: 50
   };
   const { response } = await proxyDeepseekRequest({
-    account,
-    method: "GET",
-    path,
-    query,
-    headers: JSON_HEADERS
+    account, method: "GET", path, query, headers: JSON_HEADERS
   });
-  const p = await response.json();
-  if (!p?.data?.biz_data) throw new Error("无法解析会话列表响应");
-  const list = p.data.biz_data.chat_sessions || [];
+  const p = await readPayload(response);
+  const bizData = p.data?.biz_data || {};
+  const list = (bizData.chat_sessions || []).map((s) => ({
+    id: s.id,
+    title: s.title || s.last_message_summary || "未命名",
+    pinned: Boolean(s.pinned),
+    updatedAt: s.last_update_time || s.updated_at || ""
+  }));
   return {
-    sessions: list.map((s) => ({
-      id: s.id,
-      title: s.title || s.last_message_summary || "未命名",
-      pinned: Boolean(s.pinned),
-      updatedAt: s.last_update_time || s.updated_at || ""
-    })),
-    total: p.data.biz_data.total || list.length
+    sessions: list,
+    hasMore: Boolean(bizData.has_more),
+    lastUpdatedAt: list.length > 0 ? list[list.length - 1].updatedAt : null
   };
 }
 
 /**
+ * 将 DeepSeek 的 fragments 解析为 thinking / response 文本
+ * 参考 deepseek2api public/deepseek-message.js: mapHistoryMessage
+ */
+function fragmentsToParts(fragments) {
+  if (!Array.isArray(fragments)) return { content: "", thinking: "" };
+  let content = "", thinking = "";
+  for (const f of fragments) {
+    if (!f?.content) continue;
+    const kind = f.type === "THINK" ? "thinking" : "response";
+    if (kind === "thinking") thinking += f.content;
+    else content += f.content;
+  }
+  return { content, thinking };
+}
+
+/**
  * 获取某个 DS 会话的历史消息
- * 使用 GET /api/v0/chat/history_messages?chat_session_id=xxx
+ * GET /api/v0/chat/history_messages?chat_session_id=xxx
+ * 参考 deepseek2api: session-workspace.js loadHistory()
+ * 返回 { messages, currentMessageId }
  */
 export async function fetchSessionMessages(account, chatSessionId) {
   const path = "/api/v0/chat/history_messages";
@@ -146,24 +163,21 @@ export async function fetchSessionMessages(account, chatSessionId) {
     headers: JSON_HEADERS
   });
   const p = await readPayload(response);
-  const bizData = p.data?.biz_data;
+  const bizData = p.data?.biz_data || {};
 
-  // biz_data 可能是数组 [{...}, {...}] 或对象 { messages: [...] }
-  let msgs;
-  if (Array.isArray(bizData)) {
-    msgs = bizData;
-  } else if (bizData && Array.isArray(bizData.messages)) {
-    msgs = bizData.messages;
-  } else if (bizData && Array.isArray(bizData.list)) {
-    msgs = bizData.list;
-  } else {
-    msgs = [];
-  }
+  // 参考 deepseek2api: biz_data.chat_messages (数组) + biz_data.chat_session.current_message_id
+  const rawMessages = bizData.chat_messages || [];
+  const currentMessageId = bizData.chat_session?.current_message_id || null;
 
-  return msgs.map((m) => ({
-    role: m.role === "USER" ? "user" : "assistant",
-    content: m.content || "",
-    thinking: m.sections?.filter((s) => s.kind === "thinking").map((s) => s.content).join("") || "",
-    messageId: m.message_id || null
-  }));
+  const messages = rawMessages.map((m) => {
+    const { content, thinking } = fragmentsToParts(m.fragments);
+    return {
+      role: m.role === "USER" ? "user" : "assistant",
+      content: m.content || content || "",
+      thinking,
+      messageId: m.message_id || null,
+    };
+  });
+
+  return { messages, currentMessageId };
 }

@@ -87,10 +87,24 @@ export class DeepSeekProvider extends BaseProvider {
     if (!account) throw new Error("未登录 DeepSeek，请先运行 chat2cli login");
 
     const model = options.model || "deepseek-chat-fast";
-    const prompt = buildPromptFromMessages(messages);
 
+    // 继聊：只发送最后一条消息，设置 parent_message_id
+    let prompt, parentId;
     const sessionId = options.sessionId || await createChatSession(account);
+
+    if (options.sessionId && options.parentMessageId) {
+      // 继续已有会话：只发新用户消息，引用上次回复
+      const lastUser = [...messages].reverse().find((m) => m.role === "user");
+      prompt = lastUser?.content || "";
+      parentId = options.parentMessageId;
+    } else {
+      // 新会话或无父消息引用：发送完整历史
+      prompt = buildPromptFromMessages(messages);
+      parentId = null;
+    }
+
     const body = buildChatCompletionBody({ sessionId, prompt, model });
+    if (parentId) body.parent_message_id = parentId;
 
     const { response } = await startDeepseekCompletion({ account, body });
     yield* streamRawDeltas(response);
@@ -115,18 +129,51 @@ export class DeepSeekProvider extends BaseProvider {
     return response;
   }
 
-  /** 获取 DS 会话列表 */
-  async fetchSessions(accountId) {
+  /** 获取 DS 会话列表（游标分页，单页）
+   *  cursor: 游标时间戳（秒），不传则默认当前时间+300 */
+  async fetchSessionPage(accountId, cursor) {
     const account = this.getAccountInfo(accountId);
     if (!account) throw new Error("账号未找到");
-    return fetchSessionPage(account);
+    return fetchSessionPage(account, cursor);
   }
 
-  /** 获取 DS 会话的消息 */
+  /** 获取 DS 会话列表（游标分页，自动页到底）
+   *  参照 deepseek2api session-workspace.js fetchAllSessions */
+  async fetchSessions(accountId, count = 0) {
+    const account = this.getAccountInfo(accountId);
+    if (!account) throw new Error("账号未找到");
+
+    const maxCount = count || 10000; // 不传 limit 时加载全部
+    const all = [];
+    const seen = new Set();
+    let cursor = Math.floor(Date.now() / 1000) + 300;
+
+    while (all.length < maxCount) {
+      const { sessions, hasMore, lastUpdatedAt } = await fetchSessionPage(account, cursor);
+      for (const s of sessions) {
+        if (!seen.has(s.id)) {
+          seen.add(s.id);
+          all.push(s);
+          if (all.length >= maxCount) break;
+        }
+      }
+      if (!hasMore || !lastUpdatedAt || all.length >= maxCount) break;
+      cursor = lastUpdatedAt;
+    }
+    return { sessions: all, total: all.length };
+  }
+
+  /** 获取 DS 会话的消息，返回 { messages, currentMessageId } */
   async fetchMessages(accountId, sessionId) {
     const account = this.getAccountInfo(accountId);
     if (!account) throw new Error("账号未找到");
     return fetchSessionMessages(account, sessionId);
+  }
+
+  /** 获取 DS 会话的纯消息数组（向后兼容） */
+  async fetchMessageList(accountId, sessionId) {
+    const { messages } = await this.fetchMessages(accountId, sessionId);
+    return messages;
   }
 
   /** 继续已有会话（使用已有 sessionId） */

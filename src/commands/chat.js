@@ -9,8 +9,6 @@ import {
   printUserMsg, printThinkingLabel
 } from "../utils/format.js";
 
-const PAGE_SIZE = 20;
-
 function resolveProvider() {
   return getProvider(getConfig().defaultProvider);
 }
@@ -41,26 +39,189 @@ function formatTime(isoStr) {
 
 async function loadDsSessionMessages(provider, account, sessionId) {
   try {
-    return await provider.fetchMessages(account.id, sessionId) || [];
+    const result = await provider.fetchMessages(account.id, sessionId);
+    return result || { messages: [], currentMessageId: null };
   } catch (err) {
     process.stdout.write(chalk.yellow(`  加载云端消息失败: ${err.message}\n`));
-    return [];
+    return { messages: [], currentMessageId: null };
   }
+}
+
+/** 构建条目显示文本 */
+function buildEntryLine(entry, index, selected) {
+  const cursor = selected ? chalk.green.bold("❯ ") : "  ";
+  const num = String(index).padStart(2, " ");
+  const bg = selected ? chalk.bgCyan.black : chalk.reset;
+  if (entry.type === "local") {
+    const tag = chalk.cyan("[本地]");
+    const title = (entry.conv.title || "未命名").slice(0, 40);
+    const time = formatTime(entry.conv.updatedAt || entry.conv.createdAt);
+    return bg(` ${cursor}${num} ${tag} ${title.padEnd(40)} ${chalk.gray(time)} `);
+  }
+  if (entry.type === "ds") {
+    const tag = chalk.magenta("[云端]");
+    const pinned = entry.session.pinned ? chalk.yellow("★") : " ";
+    const title = (entry.session.title || "未命名").slice(0, 40);
+    const time = formatTime(entry.sortTime);
+    return bg(` ${cursor}${num} ${tag} ${pinned}${title.padEnd(40)} ${chalk.gray(time)} `);
+  }
+  return "";
+}
+
+/** 原始模式终端列表选择器，支持底部自动加载更多 */
+function interactiveListPicker(allEntries, loadMore, noMore) {
+  const VISIBLE = 18; // 可视区域条目数（不含表头）
+
+  if (allEntries.length === 0 && noMore()) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    let cursor = 0;
+    let scroll = 0;
+    let escState = 0;
+    let loading = false;
+
+    function clearScreen() {
+      const visible = Math.min(VISIBLE, allEntries.length - scroll);
+      process.stdout.write(`\x1b[${visible + 3}A\x1b[J`);
+    }
+
+    function render() {
+      const total = allEntries.length;
+      const end = Math.min(scroll + VISIBLE, total);
+      const moreHint = noMore() ? "" : chalk.yellow(`  更多 (${total}条)`);
+
+      process.stdout.write(chalk.gray(`选择对话  ↑↓导航  Enter确认  Ctrl+C取消${moreHint}\n`));
+
+      // 新对话
+      if (cursor === -1) {
+        process.stdout.write(chalk.bgCyan.black.bold(" ❯ ") + chalk.bgCyan.black.bold("新对话") + "\x1b[0m\n");
+      } else {
+        process.stdout.write(`   ${chalk.green.bold("＋ 新对话")}\n`);
+      }
+      process.stdout.write(`  ${chalk.gray("─".repeat(56))}\n`);
+
+      for (let i = scroll; i < end; i++) {
+        const selected = i === cursor;
+        process.stdout.write(buildEntryLine(allEntries[i], i, selected) + "\n");
+      }
+
+      if (loading) {
+        process.stdout.write(chalk.yellow("\n  ⏳ 加载中..."));
+      } else {
+        process.stdout.write("");
+      }
+    }
+
+    function scrollToCursor() {
+      if (cursor < scroll) scroll = cursor;
+      else if (cursor >= scroll + VISIBLE) scroll = cursor - VISIBLE + 1;
+      if (cursor < 0) { cursor = -1; scroll = 0; }
+    }
+
+    function triggerLoadMore() {
+      if (noMore() || loading) return;
+      loading = true;
+      clearScreen();
+      render();
+      loadMore().then(() => {
+        loading = false;
+        clearScreen();
+        render();
+      }).catch(() => {
+        loading = false;
+        clearScreen();
+        render();
+      });
+    }
+
+    function onData(chunk) {
+      const str = chunk.toString("utf-8");
+      for (const char of str) {
+        const code = char.codePointAt(0);
+
+        if (escState > 0) {
+          if (char === "[" && escState === 1) { escState = 2; continue; }
+          if (escState === 2) {
+            if (char === "A") { if (cursor > 0) cursor--; else cursor = -1; }
+            else if (char === "B") { if (cursor === -1) cursor = 0; else if (cursor < allEntries.length - 1) cursor++; }
+            else if (char === "D") { if (cursor > 0) cursor = Math.max(0, cursor - 10); else cursor = -1; }
+            else if (char === "C") { if (cursor === -1) cursor = 0; else cursor = Math.min(allEntries.length - 1, cursor + 10); }
+            escState = 0;
+
+            // 接近底部（最后 3 项）自动加载
+            if (cursor >= allEntries.length - 3 && !noMore()) {
+              triggerLoadMore();
+              continue;
+            }
+
+            scrollToCursor();
+            clearScreen();
+            render();
+            continue;
+          }
+          escState = 0;
+          continue;
+        }
+
+        if (code === 27) { escState = 1; continue; }
+        if (code === 13) {
+          cleanup();
+          process.stdout.write("\n");
+          resolve(cursor);
+          return;
+        }
+        if (code === 3) {
+          cleanup();
+          process.stdout.write("\n");
+          resolve("exit");
+          return;
+        }
+        // Page Up
+        if (code === 21) {
+          cursor = Math.max(-1, cursor - VISIBLE);
+          scrollToCursor();
+          clearScreen();
+          render();
+          continue;
+        }
+        // Page Down
+        if (code === 4) {
+          cursor = Math.min(allEntries.length - 1, cursor + VISIBLE);
+          scrollToCursor();
+          clearScreen();
+          render();
+          continue;
+        }
+      }
+    }
+
+    function cleanup() {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdin.removeListener("data", onData);
+    }
+
+    try {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on("data", onData);
+      render();
+    } catch (err) {
+      cleanup();
+      resolve(null);
+    }
+  });
 }
 
 /**
  * 显示历史记录列表，让用户选择新对话或继续已有对话。
- * @returns {{ action: "new", model: string } | { action: "local", conv, model: string } | { action: "ds", account, sessionId, model: string, messages } | null}
  */
 async function pickConversation(provider, accountId) {
-  const { default: inquirer } = await import("inquirer");
   const state = getStore();
   const providerName = provider.name;
 
-  // 收集可继续的条目
+  // 收集本地对话（全部加载，数量有限）
   const allEntries = [];
-
-  // 本地对话
   for (const conv of state.conversations) {
     if (conv.provider === providerName && conv.messages?.length > 0) {
       allEntries.push({
@@ -70,20 +231,23 @@ async function pickConversation(provider, accountId) {
       });
     }
   }
+  allEntries.sort((a, b) => (b.sortTime || "").localeCompare(a.sortTime || ""));
 
-  // DeepSeek 云端会话
-  let dsHasMore = false;
+  // 云端会话按需分页加载（游标分页）
   let dsAccount = null;
+  let dsCursor = null;
+  let dsNoMore = true;
 
   if (providerName === "deepseek" && provider.isAuthenticated()) {
-    // 获取默认账号
     dsAccount = accountId ? provider.getAccountInfo(accountId) : provider.getDefaultAccount();
     if (dsAccount) {
+      dsNoMore = false;
       try {
-        const result = await provider.fetchSessions(dsAccount.id);
-        dsSessions = result.sessions || [];
-        dsHasMore = (result.total || 0) > dsSessions.length;
-        for (const s of dsSessions) {
+        const result = await provider.fetchSessionPage(dsAccount.id);
+        const sessions = result.sessions || [];
+        dsNoMore = !result.hasMore;
+        dsCursor = result.lastUpdatedAt;
+        for (const s of sessions) {
           allEntries.push({
             type: "ds",
             session: s,
@@ -94,100 +258,62 @@ async function pickConversation(provider, accountId) {
           });
         }
       } catch {
-        // 云端会话加载失败，只显示本地
+        dsNoMore = true;
       }
     }
   }
 
-  // 按时间排序（新 → 旧）
-  allEntries.sort((a, b) => (b.sortTime || "").localeCompare(a.sortTime || ""));
+  if (allEntries.length === 0) return { action: "new" };
 
-  // 构建 inquirer 选择列表
-  function buildChoiceList(pageOffset) {
-    const start = pageOffset * PAGE_SIZE;
-    const end = start + PAGE_SIZE;
-    const page = allEntries.slice(start, end);
-    const hasMore = end < allEntries.length;
-
-    const choices = [
-      { name: chalk.green.bold("＋ 新对话"), value: { action: "new" }, short: "新对话" },
-      new inquirer.Separator(chalk.gray("─".repeat(60))),
-    ];
-
-    for (const entry of page) {
-      if (entry.type === "local") {
-        const title = (entry.conv.title || "未命名").slice(0, 50);
-        choices.push({
-          name: `${chalk.cyan("[本地]")}  ${title.padEnd(50)}  ${chalk.gray(formatTime(entry.conv.updatedAt || entry.conv.createdAt))}`,
-          value: { action: "local", conv: entry.conv },
-          short: entry.conv.title || "本地对话",
-        });
-      } else if (entry.type === "ds") {
-        const title = (entry.session.title || "未命名").slice(0, 50);
-        const pinned = entry.session.pinned ? "★ " : "";
-        choices.push({
-          name: `${chalk.magenta("[云端]")}  ${pinned}${title.padEnd(49 - pinned.length)}  ${chalk.gray(formatTime(entry.sortTime))}`,
-          value: { action: "ds", session: entry.session, account: entry.account },
-          short: entry.session.title || "云端会话",
+  const loadMore = async () => {
+    if (dsNoMore || !dsAccount) return;
+    try {
+      const result = await provider.fetchSessionPage(dsAccount.id, dsCursor);
+      const sessions = result.sessions || [];
+      dsNoMore = !result.hasMore;
+      dsCursor = result.lastUpdatedAt;
+      for (const s of sessions) {
+        if (allEntries.some((e) => e.type === "ds" && e.session.id === s.id)) continue;
+        allEntries.push({
+          type: "ds",
+          session: s,
+          account: dsAccount,
+          sortTime: typeof s.updatedAt === "number"
+            ? new Date(s.updatedAt * 1000).toISOString()
+            : (s.updatedAt || ""),
         });
       }
+    } catch {
+      dsNoMore = true;
     }
-
-    if (hasMore) {
-      choices.push(new inquirer.Separator(" "));
-      choices.push({
-        name: chalk.gray(`  加载更多... (已显示 ${end}/${allEntries.length})`),
-        value: { action: "load_more", page: pageOffset + 1 },
-        short: "加载更多",
-      });
-    }
-
-    return choices;
-  }
-
-  if (allEntries.length === 0 && !dsHasMore) {
-    // 没有任何可继续的对话，直接进入新对话
-    return { action: "new" };
-  }
-
-  let pageOffset = 0;
+  };
 
   while (true) {
-    const choices = buildChoiceList(pageOffset);
-    const { selected } = await inquirer.prompt([{
-      type: "list",
-      name: "selected",
-      message: "选择对话:",
-      choices,
-      pageSize: Math.min(25, choices.length),
-    }]);
+    const cursor = await interactiveListPicker(allEntries, loadMore, () => dsNoMore);
+    if (cursor === "exit") { process.stdout.write(chalk.gray("已取消。\n")); return { action: "exit" }; }
+    if (cursor === null || cursor === -1) return { action: "new" };
 
-    if (selected.action === "new") {
-      return { action: "new" };
+    const entry = allEntries[cursor];
+    if (!entry) continue;
+
+    if (entry.type === "local") {
+      return { action: "local", conv: entry.conv };
     }
 
-    if (selected.action === "load_more") {
-      pageOffset = selected.page;
-      continue; // 重新显示，加载下一页
-    }
-
-    if (selected.action === "local") {
-      return { action: "local", conv: selected.conv };
-    }
-
-    if (selected.action === "ds") {
-      // 加载云端会话的消息
-      process.stdout.write(chalk.gray("正在加载云端消息...\n"));
-      const messages = await loadDsSessionMessages(provider, selected.account, selected.session.id);
-      if (!messages.length) {
+    if (entry.type === "ds") {
+      process.stdout.write(chalk.gray("\n正在加载云端消息...\n"));
+      const result = await loadDsSessionMessages(provider, entry.account, entry.session.id);
+      const dsMessages = result.messages || result;
+      if (!Array.isArray(dsMessages) || !dsMessages.length) {
         printInfo("该会话无消息记录，请选择其他会话。");
         continue;
       }
       return {
         action: "ds",
-        account: selected.account,
-        sessionId: selected.session.id,
-        messages,
+        account: entry.account,
+        sessionId: entry.session.id,
+        messages: dsMessages,
+        currentMessageId: result.currentMessageId || null,
       };
     }
   }
@@ -198,12 +324,12 @@ async function pickConversation(provider, accountId) {
 function echoMessages(messages) {
   for (const msg of messages) {
     if (msg.role === "user") {
-      process.stdout.write(chalk.cyan("你: ") + msg.content + "\n");
+      printUserMsg(msg.content);
     } else {
       if (msg.thinking) {
-        process.stdout.write(chalk.gray("[思考过程]\n" + msg.thinking + "\n"));
+        process.stdout.write(chalk.gray.dim("   " + msg.thinking.replace(/\n/g, "\n   ") + "\n"));
       }
-      process.stdout.write(chalk.green("AI: ") + msg.content + "\n\n");
+      process.stdout.write("   " + msg.content.replace(/\n/g, "\n   ") + "\n\n");
     }
   }
 }
@@ -249,7 +375,7 @@ async function streamResponse(provider, messages, opts) {
   return { thinking, response };
 }
 
-async function chatLoop(provider, messages, currentModel, accountId, sessionId = null) {
+async function chatLoop(provider, messages, currentModel, accountId, sessionId = null, parentMessageId = null) {
   // ── 绘制 footer + 定位到 prompt 行 ──
   function drawFooter() {
     printFooter();
@@ -398,7 +524,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       messages.push({ role: "user", content: input });
 
       const result = await streamResponse(
-        provider, messages, { model: currentModel, accountId, sessionId }
+        provider, messages, { model: currentModel, accountId, sessionId, parentMessageId }
       ).catch((err) => {
         process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
         return null;
@@ -450,8 +576,29 @@ async function runInteractiveChat(provider, opts = {}) {
     }
   }
 
-  // 显示历史记录选择器
+  // 显示历史记录选择器（--new / -n 参数跳过）
+  if (opts.skipPicker) {
+    // 直接新对话
+    const currentModel = modelOverride || getConfig().defaultModel;
+    const convId = createId();
+    printChatHeader(provider.label, currentModel, convId.slice(0, 8));
+    const messages = [];
+    await chatLoop(provider, messages, currentModel, accountId);
+    if (messages.length > 0) {
+      const conv = {
+        id: convId, provider: provider.name, model: currentModel,
+        title: buildConversationTitle(messages), messages: [...messages],
+        accountId: accountId || "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+      };
+      saveConversation(conv);
+      printSuccess(`对话已保存 (id: ${chalk.dim(convId.slice(0, 8))})`);
+    }
+    return;
+  }
+
   const picked = await pickConversation(provider, accountId);
+
+  if (picked.action === "exit") return;  // Ctrl+C 取消
 
   if (picked.action === "new") {
     // 全新对话
@@ -506,11 +653,13 @@ async function runInteractiveChat(provider, opts = {}) {
     const sessionId = picked.sessionId;
     const messages = [...picked.messages];
     const dsAccountId = picked.account?.id || accountId;
+    // 使用 API 返回的 current_message_id 作为新消息的 parent
+    const parentMsgId = picked.currentMessageId || null;
 
     printChatHeader(provider.label, currentModel, sessionId.slice(0, 8));
     echoMessages(messages);
 
-    await chatLoop(provider, messages, currentModel, dsAccountId, sessionId);
+    await chatLoop(provider, messages, currentModel, dsAccountId, sessionId, parentMsgId);
 
     if (messages.length > picked.messages.length) {
       // 保存到本地（暂存为本地对话副本）
@@ -553,6 +702,8 @@ async function runOneshotChat(provider, message, opts = {}) {
     });
   }
 }
+
+export { chatLoop, echoMessages, formatTime };
 
 export async function runChat(opts = {}) {
   initProviders();

@@ -54,6 +54,7 @@ program
   .command("chat")
   .description("开始交互式对话或发送单条消息")
   .option("-m, --message <text>", "发送单条消息（非交互模式）")
+  .option("-n, --new", "跳过历史记录，直接开始新对话")
   .option("--model <name>", "指定使用的模型")
   .option("--no-stream", "禁用流式输出")
   .action(async (opts) => {
@@ -61,7 +62,8 @@ program
       await runChat({
         message: opts.message,
         model: opts.model,
-        stream: opts.stream
+        stream: opts.stream,
+        skipPicker: opts.new
       });
     } catch (err) {
       process.stderr.write(chalk.red("错误: " + err.message + "\n"));
@@ -73,6 +75,7 @@ program
   .command("history [action]")
   .description("管理对话历史记录")
   .argument("[args...]", "额外参数")
+  .option("--limit <number>", "云端会话获取数量（默认 50）")
   .addHelpText("after", `
 ${chalk.dim("可用操作:")}
   ${chalk.cyan("history")}               列出所有本地对话
@@ -87,13 +90,16 @@ ${chalk.dim("DeepSeek 云端会话:")}
   ${chalk.cyan("history ds-continue <id>")} 继续云端会话
   ${chalk.cyan("history ds-delete <id>")}   删除云端会话
   `)
-  .action(async (action, args) => {
-    try {
-      await runHistory(action || "", ...args);
-    } catch (err) {
+  .action(function (action) {
+    // commander v12: this.args 包含所有已解析的位置参数
+    // action 是第一个位置参数，this.args.slice(1) 是 [args...] 的剩余部分
+    const restArgs = (this.args || []).slice(1);
+    const opts = this.opts();
+    const limit = Number(opts.limit) || 0;
+    runHistory(action || "", { limit }, ...restArgs).catch((err) => {
       process.stderr.write(chalk.red("错误: " + err.message + "\n"));
       process.exit(1);
-    }
+    });
   });
 
 program
