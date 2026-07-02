@@ -55,6 +55,7 @@ program
   .description("开始交互式对话或发送单条消息")
   .option("-m, --message <text>", "发送单条消息（非交互模式）")
   .option("-n, --new", "跳过历史记录，直接开始新对话")
+  .option("--no-markdown", "禁用 Markdown 渲染")
   .option("--model <name>", "指定使用的模型")
   .option("--no-stream", "禁用流式输出")
   .action(async (opts) => {
@@ -63,7 +64,8 @@ program
         message: opts.message,
         model: opts.model,
         stream: opts.stream,
-        skipPicker: opts.new
+        skipPicker: opts.new,
+        markdown: opts.markdown
       });
     } catch (err) {
       process.stderr.write(chalk.red("错误: " + err.message + "\n"));
@@ -89,6 +91,10 @@ ${chalk.dim("DeepSeek 云端会话:")}
   ${chalk.cyan("history ds")}             获取 DS 账号的云端会话列表
   ${chalk.cyan("history ds-continue <id>")} 继续云端会话
   ${chalk.cyan("history ds-delete <id>")}   删除云端会话
+
+${chalk.dim("批量操作:")}
+  ${chalk.cyan("history batch-local")}     多选删除本地对话
+  ${chalk.cyan("history batch-ds")}        多选删除云端会话
   `)
   .action(function (action) {
     // commander v12: this.args 包含所有已解析的位置参数

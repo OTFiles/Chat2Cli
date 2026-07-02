@@ -32,6 +32,8 @@ export async function runHistory(subCommand, opts = {}, ...args) {
     case "ds": await listDsSessions(limit); break;
     case "ds-continue": await continueDsSession(args[0], limit); break;
     case "ds-delete": await deleteDsSession(args[0], limit); break;
+    case "batch-local": await batchDeleteLocal(); break;
+    case "batch-ds": await batchDeleteDs(limit); break;
     default: await listAll(); break;
   }
 }
@@ -251,7 +253,7 @@ async function continueDsSession(sessionId, limit = 0) {
   printChatHeader(provider.label, currentModel, fullSessionId.slice(0, 8));
   echoMessages(messages);
 
-  await chatLoop(provider, messages, currentModel, account.id, fullSessionId, currentMessageId);
+  await chatLoop(provider, messages, currentModel, account.id, fullSessionId, currentMessageId, true);
 
   // 保存到本地
   if (messages.length > dsMessages.length) {
@@ -307,5 +309,172 @@ async function deleteDsSession(sessionId, limit = 0) {
     spinner.succeed("已删除");
   } catch (err) {
     spinner.fail(err.message);
+  }
+}
+
+// ─── 多选终端 UI ───
+
+/**
+ * 多选列表选择器。空格切换选择，上下导航，Enter 确认。
+ * @param {{ label: string, id: string }[]} entries 条目列表
+ * @returns {string[]} 选中的 ID 列表，null 表示取消
+ */
+function multiSelectPicker(entries, title = "选择") {
+  if (!entries.length) return Promise.resolve([]);
+
+  return new Promise((resolve) => {
+    const PAGE = 20;
+    let selected = new Set();
+    let cursor = 0;
+    let scroll = 0;
+    let escState = 0;
+
+    function clearScreen() {
+      const lines = Math.min(PAGE, entries.length - scroll) + 2;
+      process.stdout.write(`\x1b[${lines}A\x1b[J`);
+    }
+
+    function render() {
+      const end = Math.min(scroll + PAGE, entries.length);
+      process.stdout.write(chalk.gray(`${title}  [空格]选择  [Enter]确认删除  [Ctrl+C]取消  (已选 ${selected.size})\n`));
+      process.stdout.write(`  ${chalk.gray("─".repeat(56))}\n`);
+      for (let i = scroll; i < end; i++) {
+        const e = entries[i];
+        const sel = selected.has(e.id);
+        const mark = sel ? chalk.green("✓") : " ";
+        const line = i === cursor
+          ? chalk.bgCyan.black(` ❯ [${mark}] ${e.label.padEnd(50)}`)
+          : `   [${mark}] ${e.label.padEnd(50)}`;
+        process.stdout.write(line + "\n");
+      }
+    }
+
+    function scrollTo() {
+      if (cursor < scroll) scroll = cursor;
+      else if (cursor >= scroll + PAGE) scroll = cursor - PAGE + 1;
+    }
+
+    function toggle() {
+      if (selected.has(entries[cursor].id)) selected.delete(entries[cursor].id);
+      else selected.add(entries[cursor].id);
+    }
+
+    function onData(chunk) {
+      const str = chunk.toString("utf-8");
+      for (const char of str) {
+        const code = char.codePointAt(0);
+        if (escState > 0) {
+          if (char === "[" && escState === 1) { escState = 2; continue; }
+          if (escState === 2) {
+            if (char === "A") { if (cursor > 0) cursor--; }
+            else if (char === "B") { if (cursor < entries.length - 1) cursor++; }
+            escState = 0; scrollTo(); clearScreen(); render(); continue;
+          }
+          escState = 0; continue;
+        }
+        if (code === 27) { escState = 1; continue; }
+        if (code === 32) { toggle(); clearScreen(); render(); continue; }
+        if (code === 13) {
+          cleanup();
+          if (!selected.size) { process.stdout.write("\n"); resolve([]); return; }
+          resolve([...selected]);
+          return;
+        }
+        if (code === 3) { cleanup(); process.stdout.write("\n"); resolve(null); return; }
+      }
+    }
+
+    function cleanup() {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdin.removeListener("data", onData);
+    }
+
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on("data", onData);
+    render();
+  });
+}
+
+// ─── 批量删除 ───
+
+async function batchDeleteLocal() {
+  const state = getStore();
+  const convs = state.conversations;
+  if (!convs.length) { printInfo("没有本地对话。"); return; }
+
+  const entries = convs.map((c) => ({
+    id: c.id,
+    label: `[${c.provider}] ${(c.title || "未命名").slice(0, 40)}  ${formatDate(c.updatedAt || c.createdAt)}`
+  }));
+
+  const selected = await multiSelectPicker(entries, "批量删除本地对话");
+  if (!selected) { process.stdout.write(chalk.gray("已取消。\n")); return; }
+  if (!selected.length) { printInfo("未选择任何对话。"); return; }
+
+  process.stdout.write(`\n`);
+  const { confirm } = await inquirer.prompt([{
+    type: "confirm", name: "confirm",
+    message: `确定删除 ${chalk.red(selected.length)} 条本地对话吗？此操作不可撤销！`,
+    default: false
+  }]);
+  if (!confirm) { printInfo("已取消。"); return; }
+
+  updateStore((s) => ({
+    ...s,
+    conversations: s.conversations.filter((c) => !selected.includes(c.id))
+  }));
+  printSuccess(`已删除 ${selected.length} 条本地对话。`);
+}
+
+async function batchDeleteDs(limit = 0) {
+  const provider = getProvider("deepseek");
+  if (!provider?.isAuthenticated()) { printError("未登录 DeepSeek"); return; }
+
+  const account = await selectDsAccount(provider);
+  if (!account) return;
+
+  const spinner = ora("正在获取云端会话...").start();
+  let sessions = [];
+  try {
+    const result = await provider.fetchSessions(account.id, limit);
+    sessions = result.sessions || [];
+    spinner.succeed(`获取到 ${sessions.length} 条云端会话`);
+  } catch (err) {
+    spinner.fail(err.message);
+    return;
+  }
+
+  const entries = sessions.map((s) => ({
+    id: s.id,
+    label: `${s.pinned ? "★ " : ""}${(s.title || "未命名").slice(0, 40)}  ${formatDate(typeof s.updatedAt === "number" ? new Date(s.updatedAt * 1000).toISOString() : s.updatedAt)}`
+  }));
+
+  const selected = await multiSelectPicker(entries, "批量删除云端会话");
+  if (!selected) { process.stdout.write(chalk.gray("已取消。\n")); return; }
+  if (!selected.length) { printInfo("未选择任何会话。"); return; }
+
+  process.stdout.write(`\n`);
+  const { confirm } = await inquirer.prompt([{
+    type: "confirm", name: "confirm",
+    message: `确定从云端删除 ${chalk.red(selected.length)} 条会话吗？此操作不可撤销！`,
+    default: false
+  }]);
+  if (!confirm) { printInfo("已取消。"); return; }
+
+  let ok = 0, fail = 0;
+  for (const sid of selected) {
+    try {
+      await provider.deleteSession(account.id, sid);
+      ok++;
+    } catch {
+      fail++;
+    }
+  }
+  if (fail) {
+    printWarn(`删除完成: ${ok} 成功, ${fail} 失败`);
+  } else {
+    printSuccess(`已删除 ${ok} 条云端会话。`);
   }
 }

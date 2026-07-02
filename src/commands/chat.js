@@ -8,6 +8,7 @@ import {
   printChatHeader, printFooter,
   printUserMsg, printThinkingLabel, accountLabel
 } from "../utils/format.js";
+import { renderMarkdown } from "../utils/markdown.js";
 
 function resolveProvider() {
   return getProvider(getConfig().defaultProvider);
@@ -338,12 +339,15 @@ function echoMessages(messages) {
  * 流式响应，直接向 stdout 写入（AI 输出每行带 3 空格缩进，与 ❯ 对齐）
  */
 async function streamResponse(provider, messages, opts) {
+  const useMarkdown = opts.markdown !== false;
   let thinking = "";
   let response = "";
   let firstChunk = true;
   /** 继聊时 service 返回的 response_message_id / 新会话 ID */
   let messageId = null;
   let sessionId = null;
+  // 流式 markdown 行缓冲
+  let mdLineBuf = "";
 
   for await (const delta of provider.chat(messages, opts)) {
     // 内部元数据
@@ -359,22 +363,36 @@ async function streamResponse(provider, messages, opts) {
     if (delta.kind === "thinking") {
       thinking += delta.text;
       let t = delta.text;
-      if (thinking === t) t = "   " + t;           // 首个 thinking delta 缩进
-      t = t.replace(/\n/g, "\n   ");                // 段内换行也缩进
+      if (thinking === t) t = "   " + t;
+      t = t.replace(/\n/g, "\n   ");
       process.stdout.write(chalk.gray(t));
     } else {
-      let text = delta.text;
-      if (response.length === 0) {
-        if (thinking) {
-          text = "\n   " + text;
-        } else {
-          text = "   " + text;
-        }
-      }
-      text = text.replace(/\n/g, "\n   ");
       response += delta.text;
-      process.stdout.write(chalk.white(text));
+      if (!useMarkdown) {
+        let text = delta.text;
+        if (response === delta.text) {
+          text = (thinking ? "\n   " : "   ") + text;
+        }
+        text = text.replace(/\n/g, "\n   ");
+        process.stdout.write(chalk.white(text));
+        continue;
+      }
+
+      // Markdown: 按行缓冲渲染
+      mdLineBuf += delta.text;
+      let newlineIdx;
+      while ((newlineIdx = mdLineBuf.indexOf("\n")) >= 0) {
+        const line = mdLineBuf.slice(0, newlineIdx);
+        mdLineBuf = mdLineBuf.slice(newlineIdx + 1);
+        process.stdout.write(renderLine(line, thinking, response));
+        thinking = ""; // 只首次缩进
+      }
     }
+  }
+
+  // 最后一行
+  if (useMarkdown && mdLineBuf) {
+    process.stdout.write(renderLine(mdLineBuf, thinking, response));
   }
 
   if (firstChunk) return null;
@@ -382,7 +400,30 @@ async function streamResponse(provider, messages, opts) {
   return { thinking, response, messageId, sessionId };
 }
 
-async function chatLoop(provider, messages, currentModel, accountId, sessionId = null, parentMessageId = null) {
+/** 渲染单行 markdown */
+const _globalState = { responseStarted: false };
+function renderLine(line, needsIndent, fullResponse) {
+  let out = "";
+  if (!_globalState.responseStarted) {
+    _globalState.responseStarted = true;
+    if (needsIndent) out += "\n";
+    if (!line.trim() || line.startsWith("```")) {
+      out += (needsIndent ? "" : "   ");
+    } else {
+      out += "   ";
+    }
+  }
+  const rendered = renderMarkdown(line, true);
+  out += rendered + "\n";
+  return out;
+}
+
+// 每次新对话重置状态
+export function resetMarkdownState() {
+  _globalState.responseStarted = false;
+}
+
+async function chatLoop(provider, messages, currentModel, accountId, sessionId = null, parentMessageId = null, markdown = true) {
   // ── 绘制 footer + 定位到 prompt 行 ──
   function drawFooter() {
     printFooter();
@@ -538,7 +579,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       messages.push({ role: "user", content: input });
 
       const result = await streamResponse(
-        provider, messages, { model: currentModel, accountId, sessionId, parentMessageId }
+        provider, messages, { model: currentModel, accountId, sessionId, parentMessageId, markdown }
       ).catch((err) => {
         process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
         return null;
@@ -575,6 +616,8 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
 
 async function runInteractiveChat(provider, opts = {}) {
   const { model: modelOverride } = opts;
+  const useMarkdown = opts.markdown !== false;
+  resetMarkdownState();
 
   if (!provider.isAuthenticated()) {
     printError("尚未登录。请运行: chat2cli login");
@@ -607,7 +650,7 @@ async function runInteractiveChat(provider, opts = {}) {
     const convId = createId();
     printChatHeader(provider.label, currentModel, convId.slice(0, 8));
     const messages = [];
-    await chatLoop(provider, messages, currentModel, accountId);
+    await chatLoop(provider, messages, currentModel, accountId, null, null, useMarkdown);
     if (messages.length > 0) {
       const conv = {
         id: convId, provider: provider.name, model: currentModel,
@@ -631,7 +674,7 @@ async function runInteractiveChat(provider, opts = {}) {
 
     printChatHeader(provider.label, currentModel, convId.slice(0, 8));
     const messages = [];
-    await chatLoop(provider, messages, currentModel, accountId);
+    await chatLoop(provider, messages, currentModel, accountId, null, null, useMarkdown);
 
     if (messages.length > 0) {
       const conv = {
@@ -655,7 +698,7 @@ async function runInteractiveChat(provider, opts = {}) {
     printChatHeader(provider.label, currentModel, conv.id.slice(0, 8));
     echoMessages(messages);
 
-    await chatLoop(provider, messages, currentModel, convAccountId);
+    await chatLoop(provider, messages, currentModel, convAccountId, null, null, useMarkdown);
 
     if (messages.length > conv.messages.length) {
       updateStore((state) => ({
@@ -683,7 +726,7 @@ async function runInteractiveChat(provider, opts = {}) {
     printChatHeader(provider.label, currentModel, sessionId.slice(0, 8));
     echoMessages(messages);
 
-    await chatLoop(provider, messages, currentModel, dsAccountId, sessionId, parentMsgId);
+    await chatLoop(provider, messages, currentModel, dsAccountId, sessionId, parentMsgId, useMarkdown);
 
     if (messages.length > picked.messages.length) {
       // 保存到本地（暂存为本地对话副本）
