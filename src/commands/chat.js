@@ -48,25 +48,46 @@ async function loadDsSessionMessages(provider, account, sessionId) {
   }
 }
 
-/** 构建条目显示文本 */
+/** 构建条目显示文本（截断到单行） */
 function buildEntryLine(entry, index, selected) {
   const cursor = selected ? chalk.green.bold("❯ ") : "  ";
   const num = String(index).padStart(2, " ");
   const bg = selected ? chalk.bgCyan.black : chalk.reset;
+  const maxCols = (process.stdout.columns || 80) - 1; // 预留 1 列防止换行
+  // 前缀: " " + cursor(2) + num(2) + " " = ~5 chars + time(16) + padding = ~25 fixed
+  const prefixLen = 7; // " " + cursor + num + spaces
+  const suffixLen = 18; // " " + time(16) + " "
+  const maxTitle = maxCols - prefixLen - suffixLen;
+
   if (entry.type === "local") {
     const tag = chalk.cyan("[本地]");
-    const title = (entry.conv.title || "未命名").slice(0, 40);
+    const full = (entry.conv.title || "未命名");
+    const title = fitOneLine(full, maxTitle - 7); // -7 for tag
     const time = formatTime(entry.conv.updatedAt || entry.conv.createdAt);
-    return bg(` ${cursor}${num} ${tag} ${title.padEnd(40)} ${chalk.gray(time)} `);
+    return bg(` ${cursor}${num} ${tag} ${title}`) + chalk.gray(" ".repeat(Math.max(1, maxTitle - [...title].reduce((s, c) => s + (c.charCodeAt(0) > 127 ? 2 : 1), 0) - 7)) + " " + time);
   }
   if (entry.type === "ds") {
     const tag = chalk.magenta("[云端]");
     const pinned = entry.session.pinned ? chalk.yellow("★") : " ";
-    const title = (entry.session.title || "未命名").slice(0, 40);
+    const full = (entry.session.title || "未命名");
+    // pinned char (+1)
+    const pinW = pinned.trim() ? 1 : 0;
+    const title = fitOneLine(full, maxTitle - 7 - pinW);
     const time = formatTime(entry.sortTime);
-    return bg(` ${cursor}${num} ${tag} ${pinned}${title.padEnd(40)} ${chalk.gray(time)} `);
+    return bg(` ${cursor}${num} ${tag} ${pinned}${title}`) + chalk.gray(" ".repeat(Math.max(1, maxTitle - [...title].reduce((s, c) => s + (c.charCodeAt(0) > 127 ? 2 : 1), 0) - 7 - pinW)) + " " + time);
   }
   return "";
+}
+
+/** 截断文本到 maxCols 列（中文字符计 2 列） */
+function fitOneLine(text, maxLen) {
+  let w = 0;
+  for (let i = 0; i < text.length; i++) {
+    const cw = text.charCodeAt(i) > 127 ? 2 : 1;
+    if (w + cw > maxLen) return text.slice(0, i) + "...";
+    w += cw;
+  }
+  return text;
 }
 
 /** 原始模式终端列表选择器，支持底部自动加载更多 */
@@ -322,7 +343,7 @@ async function pickConversation(provider, accountId) {
 
 // ─── 显示已有消息（继续对话时回显）───
 
-function echoMessages(messages) {
+function echoMessages(messages, markdown = true) {
   for (const msg of messages) {
     if (msg.role === "user") {
       printUserMsg(msg.content);
@@ -330,7 +351,9 @@ function echoMessages(messages) {
       if (msg.thinking) {
         process.stdout.write(chalk.gray.dim("   " + msg.thinking.replace(/\n/g, "\n   ") + "\n"));
       }
-      process.stdout.write("   " + msg.content.replace(/\n/g, "\n   ") + "\n\n");
+      const rendered = markdown ? renderMarkdown(msg.content, true) : msg.content;
+      // markdown renderer 已处理缩进，这里加空白行分隔
+      process.stdout.write(rendered.replace(/\n/g, "\n") + "\n\n");
     }
   }
 }
@@ -696,7 +719,7 @@ async function runInteractiveChat(provider, opts = {}) {
     const convAccountId = conv.accountId || accountId;
 
     printChatHeader(provider.label, currentModel, conv.id.slice(0, 8));
-    echoMessages(messages);
+    echoMessages(messages, useMarkdown);
 
     await chatLoop(provider, messages, currentModel, convAccountId, null, null, useMarkdown);
 
@@ -724,7 +747,7 @@ async function runInteractiveChat(provider, opts = {}) {
     const parentMsgId = picked.currentMessageId || null;
 
     printChatHeader(provider.label, currentModel, sessionId.slice(0, 8));
-    echoMessages(messages);
+    echoMessages(messages, useMarkdown);
 
     await chatLoop(provider, messages, currentModel, dsAccountId, sessionId, parentMsgId, useMarkdown);
 

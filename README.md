@@ -14,6 +14,8 @@
 - **Function Calling** - API 服务支持 OpenAI 兼容的 `tools`/`tool_choice` 工具调用
 - **API Key 管理** - 生成分发 API Key，支持自定义 Key 值，每个 Key 可绑定到独立账号
 - **模型切换** - 对话中随时切换模型
+- **Markdown 渲染** - 支持标题/代码块/表格/列表等，可通过 `--no-markdown` 关闭
+- **批量管理** - 多选删除本地对话和云端会话
 - **本地存储** - 数据保存在 `~/.chat2cli/` 目录，纯 JSON 格式
 
 ## 快速开始
@@ -60,6 +62,9 @@ chat2cli chat
 chat2cli chat -n
 chat2cli chat --new
 
+# 禁用 Markdown 渲染
+chat2cli chat --no-markdown
+
 # 单条消息
 chat2cli chat -m "用中文解释什么是递归"
 
@@ -96,6 +101,11 @@ chat2cli history ds-continue <id>        # 继续云端会话
 chat2cli history ds-continue --limit 70 <id>  # 扩大搜索范围
 chat2cli history ds-delete <id>          # 删除云端会话
 chat2cli history ds-delete --limit 70 <id>   # 扩大搜索范围
+
+# 批量操作（多选 UI：空格选择，上下键切换，Enter 确认）
+chat2cli history batch-local           # 多选删除本地对话
+chat2cli history batch-ds              # 多选删除云端会话
+chat2cli history batch-ds --limit 100  # 扩大云端会话加载范围
 ```
 
 会话 ID 支持前缀匹配，只需输入前几位即可。

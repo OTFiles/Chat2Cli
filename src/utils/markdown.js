@@ -93,6 +93,7 @@ export function renderMarkdown(text, enabled = true) {
   const output = [];
   let codeBlock = false;
   let codeLang = "";
+  let codeLineNum = 0;
   let tableLines = [];
   let blockquote = false;
   let i = 0;
@@ -119,18 +120,25 @@ export function renderMarkdown(text, enabled = true) {
       if (!codeBlock) {
         codeLang = line.trimStart().slice(3).trim().toUpperCase();
         codeBlock = true;
-        output.push(chalk.dim("┌" + HR_CHAR.repeat(4) + (codeLang ? " " + chalk.bold(codeLang) + " " : "") + HR_CHAR.repeat(60)));
+        codeLineNum = 0;
+        const hr = HR_CHAR.repeat(process.stdout.columns - 3 || 72);
+        const langLabel = codeLang ? " " + chalk.bold(codeLang) + " " : " ";
+        output.push(chalk.dim("   " + langLabel + hr.slice(langLabel.length + 3)));
       } else {
-        output.push(chalk.dim("└" + HR_CHAR.repeat(66)));
+        const hr = HR_CHAR.repeat(process.stdout.columns - 3 || 72);
+        output.push(chalk.dim("   " + hr));
         codeBlock = false;
         codeLang = "";
+        codeLineNum = 0;
       }
       i++;
       continue;
     }
 
     if (codeBlock) {
-      output.push(" " + chalk.gray(line.replace(/^ {0,3}/, "")));
+      codeLineNum++;
+      const num = chalk.gray(String(codeLineNum).padStart(3, " "));
+      output.push("   " + num + " " + chalk.white(line.replace(/^ {0,3}/, "")));
       i++;
       continue;
     }

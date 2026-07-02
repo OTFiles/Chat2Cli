@@ -251,7 +251,7 @@ async function continueDsSession(sessionId, limit = 0) {
   const currentModel = "deepseek-chat-fast";
 
   printChatHeader(provider.label, currentModel, fullSessionId.slice(0, 8));
-  echoMessages(messages);
+  echoMessages(messages, true);
 
   await chatLoop(provider, messages, currentModel, account.id, fullSessionId, currentMessageId, true);
 
@@ -314,6 +314,20 @@ async function deleteDsSession(sessionId, limit = 0) {
 
 // ─── 多选终端 UI ───
 
+function fitOneLine(text, maxLen) {
+  let w = 0;
+  for (let i = 0; i < text.length; i++) {
+    const cw = text.charCodeAt(i) > 127 ? 2 : 1;
+    if (w + cw > maxLen) return text.slice(0, i) + "...";
+    w += cw;
+  }
+  return text;
+}
+
+function cjkWidth(text) {
+  return [...text].reduce((s, c) => s + (c.charCodeAt(0) > 127 ? 2 : 1), 0);
+}
+
 /**
  * 多选列表选择器。空格切换选择，上下导航，Enter 确认。
  * @param {{ label: string, id: string }[]} entries 条目列表
@@ -335,16 +349,20 @@ function multiSelectPicker(entries, title = "选择") {
     }
 
     function render() {
+      const maxCols = (process.stdout.columns || 80) - 1;
       const end = Math.min(scroll + PAGE, entries.length);
       process.stdout.write(chalk.gray(`${title}  [空格]选择  [Enter]确认删除  [Ctrl+C]取消  (已选 ${selected.size})\n`));
       process.stdout.write(`  ${chalk.gray("─".repeat(56))}\n`);
       for (let i = scroll; i < end; i++) {
         const e = entries[i];
         const sel = selected.has(e.id);
-        const mark = sel ? chalk.green("✓") : " ";
+        // 用白色 ✓ 在深色背景上更显眼
+        const mark = sel ? (i === cursor ? chalk.white("✓") : chalk.green("✓")) : " ";
+        const label = fitOneLine(e.label, maxCols - 12);
+        const blank = " ".repeat(Math.max(1, maxCols - 12 - cjkWidth(label)));
         const line = i === cursor
-          ? chalk.bgCyan.black(` ❯ [${mark}] ${e.label.padEnd(50)}`)
-          : `   [${mark}] ${e.label.padEnd(50)}`;
+          ? chalk.bgCyan.black(` ❯ [${mark}] ${label}${blank}`)
+          : `   [${mark}] ${label}${blank}`;
         process.stdout.write(line + "\n");
       }
     }
