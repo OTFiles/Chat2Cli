@@ -1,6 +1,6 @@
 import { BaseProvider } from "../base.js";
 import { loginToDeepseek } from "./auth.js";
-import { startDeepseekCompletion, streamRawDeltas } from "./chat.js";
+import { startDeepseekCompletion, streamRawDeltas, streamDeltasWithMessageId } from "./chat.js";
 import { createChatSession, deleteChatSession, fetchSessionPage, fetchSessionMessages } from "./proxy.js";
 import { createId } from "../../utils/id.js";
 import { getStore, updateStore } from "../../storage/store.js";
@@ -92,13 +92,13 @@ export class DeepSeekProvider extends BaseProvider {
     let prompt, parentId;
     const sessionId = options.sessionId || await createChatSession(account);
 
-    if (options.sessionId && options.parentMessageId) {
-      // 继续已有会话：只发新用户消息，引用上次回复
+    if (options.sessionId) {
+      // 继续已有会话：只发最后一条用户消息，不带历史（历史已在会话中）
       const lastUser = [...messages].reverse().find((m) => m.role === "user");
       prompt = lastUser?.content || "";
-      parentId = options.parentMessageId;
+      parentId = options.parentMessageId || null;
     } else {
-      // 新会话或无父消息引用：发送完整历史
+      // 新会话：发送完整历史
       prompt = buildPromptFromMessages(messages);
       parentId = null;
     }
@@ -107,7 +107,20 @@ export class DeepSeekProvider extends BaseProvider {
     if (parentId) body.parent_message_id = parentId;
 
     const { response } = await startDeepseekCompletion({ account, body });
-    yield* streamRawDeltas(response);
+
+    // 统一用 streamDeltasWithMessageId 捕获 response_message_id
+    // 新会话还需额外 yield sessionId 供 chatLoop 复用
+    const stream = streamDeltasWithMessageId(response);
+
+    if (!options.sessionId) {
+      yield { kind: "__sessionId", text: sessionId };
+    }
+
+    yield* stream.deltas;
+
+    if (stream.messageId) {
+      yield { kind: "__messageId", text: stream.messageId };
+    }
   }
 
   /** Server 用

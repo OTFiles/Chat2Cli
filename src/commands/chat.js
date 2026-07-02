@@ -341,8 +341,15 @@ async function streamResponse(provider, messages, opts) {
   let thinking = "";
   let response = "";
   let firstChunk = true;
+  /** 继聊时 service 返回的 response_message_id / 新会话 ID */
+  let messageId = null;
+  let sessionId = null;
 
   for await (const delta of provider.chat(messages, opts)) {
+    // 内部元数据
+    if (delta.kind === "__messageId") { messageId = delta.text; continue; }
+    if (delta.kind === "__sessionId") { sessionId = delta.text; continue; }
+
     if (firstChunk) {
       if (opts.model?.includes("reasoner")) {
         printThinkingLabel();
@@ -351,19 +358,19 @@ async function streamResponse(provider, messages, opts) {
     }
     if (delta.kind === "thinking") {
       thinking += delta.text;
-      // 思考文本：行首缩进 + 换行后也缩进
-      process.stdout.write("   " + chalk.gray(delta.text.replace(/\n/g, "\n   ")));
+      let t = delta.text;
+      if (thinking === t) t = "   " + t;           // 首个 thinking delta 缩进
+      t = t.replace(/\n/g, "\n   ");                // 段内换行也缩进
+      process.stdout.write(chalk.gray(t));
     } else {
       let text = delta.text;
-      // 判断是否第一次输出响应内容（之前有思考或刚开头）
       if (response.length === 0) {
         if (thinking) {
-          text = "\n   " + text;   // 思考之后 ，换行 + 缩进
+          text = "\n   " + text;
         } else {
-          text = "   " + text;     // 没有思考，直接缩进开头
+          text = "   " + text;
         }
       }
-      // 后续换行也缩进
       text = text.replace(/\n/g, "\n   ");
       response += delta.text;
       process.stdout.write(chalk.white(text));
@@ -371,8 +378,8 @@ async function streamResponse(provider, messages, opts) {
   }
 
   if (firstChunk) return null;
-  process.stdout.write("\n\n");  // 结束换行
-  return { thinking, response };
+  process.stdout.write("\n\n");
+  return { thinking, response, messageId, sessionId };
 }
 
 async function chatLoop(provider, messages, currentModel, accountId, sessionId = null, parentMessageId = null) {
@@ -547,6 +554,16 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       const assistantMsg = { role: "assistant", content: result.response };
       if (result.thinking) assistantMsg.thinking = result.thinking;
       messages.push(assistantMsg);
+
+      // 新会话首次创建后复用 sessionId（后续消息不再新开会话）
+      if (!sessionId && result.sessionId) {
+        sessionId = result.sessionId;
+      }
+
+      // 更新 parentMessageId 供下次继聊使用（参照 deepseek2api onReady 更新）
+      if (result.messageId && sessionId) {
+        parentMessageId = result.messageId;
+      }
 
       redrawFooter();
     }
