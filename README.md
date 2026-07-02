@@ -212,9 +212,19 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 | qwen-max | Qwen Max |
 | qwen-plus | Qwen Plus |
 | qwen-turbo | Qwen Turbo |
+| qwen3-max | Qwen3 Max |
+| qwen3-plus | Qwen3 Plus |
+| qwen3-turbo | Qwen3 Turbo |
+| qwen3-coder | Qwen3 Coder |
 | qwen3.5-coder | Qwen3.5 Coder |
+| qwen-coder-plus | Qwen Coder Plus |
+| qwen-coder-turbo | Qwen Coder Turbo |
+| qwen2.5-coder | Qwen2.5 Coder |
 | qwq-plus | QwQ Plus |
 | qwq-plus-latest | QwQ Plus Latest |
+| qwq | QwQ |
+| qwen-vl-max | Qwen VL Max |
+| qwen-vl-plus | Qwen VL Plus |
 
 ## 数据存储
 
@@ -290,8 +300,9 @@ export class MyProvider extends BaseProvider {
 
 ## 致谢
 
-本项目 DeepSeek Provider 的核心代码参考自 [TQZHR/deepseek2api](https://github.com/TQZHR/deepseek2api)，包括：
+本项目核心代码参考了以下开源项目：
 
+**DeepSeek Provider**: 参考 [TQZHR/deepseek2api](https://github.com/TQZHR/deepseek2api)：
 - DeepSeek 登录认证与 Token 管理
 - PoW 挑战求解与代理请求
 - SSE 流式响应解析
@@ -299,7 +310,12 @@ export class MyProvider extends BaseProvider {
 - XML 工具调用解析 (Tool Parser) 与流式拦截 (Tool Sieve)
 - Function Calling prompt 构建与消息规范化
 
-特此感谢 TQZHR 的开源贡献。
+**Qwen Provider**: 参考 [qwen2API](https://github.com/YuJunZhiXue/qwen2API)：
+- SSE 流式响应解析（ParseQwenEvent）
+- 聊天 payload 构建格式
+- 基于邮箱和密码登录由我实现(小小的骄傲一下www)
+
+特此感谢 TQZHR 及 qwen2API 的开源贡献。
 
 ## License
 

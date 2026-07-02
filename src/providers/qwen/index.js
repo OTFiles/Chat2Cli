@@ -10,9 +10,19 @@ const QWEN_MODELS = [
   { id: "qwen-max", label: "Qwen Max" },
   { id: "qwen-plus", label: "Qwen Plus" },
   { id: "qwen-turbo", label: "Qwen Turbo" },
+  { id: "qwen3-max", label: "Qwen3 Max" },
+  { id: "qwen3-plus", label: "Qwen3 Plus" },
+  { id: "qwen3-turbo", label: "Qwen3 Turbo" },
+  { id: "qwen3-coder", label: "Qwen3 Coder" },
   { id: "qwen3.5-coder", label: "Qwen3.5 Coder" },
+  { id: "qwen-coder-plus", label: "Qwen Coder Plus" },
+  { id: "qwen-coder-turbo", label: "Qwen Coder Turbo" },
+  { id: "qwen2.5-coder", label: "Qwen2.5 Coder" },
   { id: "qwq-plus", label: "QwQ Plus" },
   { id: "qwq-plus-latest", label: "QwQ Plus Latest" },
+  { id: "qwq", label: "QwQ" },
+  { id: "qwen-vl-max", label: "Qwen VL Max" },
+  { id: "qwen-vl-plus", label: "Qwen VL Plus" },
 ];
 
 function genRequestId() {
@@ -25,12 +35,21 @@ function genFid() {
 
 function buildHeaders(token) {
   return {
-    Accept: "application/json, text/event-stream",
-    "Content-Type": "application/json",
     Authorization: `Bearer ${token}`,
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    Accept: "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Content-Type": "application/json",
     "x-request-id": genRequestId(),
-    Origin: QWEN_BASE_URL,
     Referer: `${QWEN_BASE_URL}/`,
+    Origin: QWEN_BASE_URL,
+    Connection: "keep-alive",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
   };
 }
 
@@ -138,27 +157,56 @@ function buildQwenPayload(chatId, model, prompt, thinkingEnabled = true, enableS
 
 /**
  * 解析 Qwen SSE 数据行，提取 thinking / response delta
+ * 参照 qwen2API ParseQwenEvent() 支持多种响应格式
+ * @returns {Array<{kind: string, text: string}>|null}
  */
 function parseQwenSseData(jsonStr) {
   try {
     const obj = JSON.parse(jsonStr);
-    const choice = obj?.choices?.[0];
-    if (!choice) return null;
-    const delta = choice.delta;
-    if (!delta) return null;
+    const events = [];
 
-    // reasoning_content → thinking
-    if (delta.reasoning_content) {
-      return { kind: "thinking", text: delta.reasoning_content };
+    // 1. 处理 choices[0].delta
+    const choice = obj?.choices?.[0];
+    if (choice?.delta) {
+      const delta = choice.delta;
+      const extra = delta.extra;
+      const reasoning = firstString(delta.reasoning_content, delta.reasoning,
+        delta.reasoning_text, delta.thinking, delta.thoughts,
+        extra?.reasoning_content, extra?.reasoning,
+        extra?.reasoning_text, extra?.thinking, extra?.thoughts);
+      const content = delta.content || "";
+      if (reasoning) events.push({ kind: "thinking", text: reasoning });
+      if (content) events.push({ kind: "response", text: content });
     }
-    // content → response
-    if (delta.content) {
-      return { kind: "response", text: delta.content };
+
+    // 2. 处理顶层 content/reasoning 字段
+    const topReasoning = firstString(obj.reasoning_content, obj.reasoning, obj.thinking);
+    const topContent = firstString(obj.content, obj.answer, obj.text, obj.delta);
+    if (topReasoning) events.push({ kind: "thinking", text: topReasoning });
+    if (topContent) events.push({ kind: "response", text: topContent });
+
+    // 3. 递归解析 data 和 message 子对象
+    if (obj.data && typeof obj.data === "object" && !Array.isArray(obj.data)) {
+      const subEvents = parseQwenSseData(JSON.stringify(obj.data));
+      if (subEvents) events.push(...subEvents);
     }
-    return null;
+    if (obj.message && typeof obj.message === "object" && !Array.isArray(obj.message)) {
+      const subEvents = parseQwenSseData(JSON.stringify(obj.message));
+      if (subEvents) events.push(...subEvents);
+    }
+
+    return events.length > 0 ? events : null;
   } catch {
     return null;
   }
+}
+
+/** 返回第一个非空字符串值 */
+function firstString(...values) {
+  for (const v of values) {
+    if (typeof v === "string" && v.trim() !== "") return v;
+  }
+  return "";
 }
 
 export class QwenProvider extends BaseProvider {
@@ -181,6 +229,7 @@ export class QwenProvider extends BaseProvider {
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
         "User-Agent": "Mozilla/5.0 (Android 10; Mobile; rv:150.0) Gecko/150.0 Firefox/150.0",
         Referer: "https://chat.qwen.ai/auth?action=signin",
         Version: "0.2.68",
@@ -188,6 +237,11 @@ export class QwenProvider extends BaseProvider {
         "X-Request-Id": genRequestId(),
         "bx-v": "2.5.36",
         Origin: QWEN_BASE_URL,
+        Connection: "keep-alive",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        Priority: "u=0",
       },
       body: JSON.stringify({ email, password: passwordHash }),
       timeout: 15000,
@@ -351,8 +405,12 @@ export class QwenProvider extends BaseProvider {
           const data = trimmed.slice(5).trimStart();
           if (!data || data === "[DONE]") continue;
 
-          const delta = parseQwenSseData(data);
-          if (delta) yield delta;
+          const deltas = parseQwenSseData(data);
+          if (deltas) {
+            for (const delta of deltas) {
+              yield delta;
+            }
+          }
         }
       }
     } finally {

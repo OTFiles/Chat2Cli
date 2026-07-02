@@ -36,10 +36,11 @@ src/commands/*.js        命令实现（login / chat / history / config / apikey
     ↓
 src/providers/registry.js Provider 注册中心（Map<name, instance>）
     ↓
-src/providers/deepseek/  DeepSeek Provider（主要 provider）
-src/providers/openai/    OpenAI Provider（简单封装）
+src/providers/deepseek/  DeepSeek Provider
+src/providers/openai/    OpenAI Provider
+src/providers/qwen/      Qwen Provider（单文件）
     ↓
-src/bridge.js            OpenAI ↔ DeepSeek 协议桥接（prompt 构建、SSE 流转换、模型配置）
+src/bridge.js            OpenAI ↔ DeepSeek/Qwen 协议桥接（prompt 构建、SSE 流转换、模型配置）
     ↓
 src/storage/store.js     JSON 文件存储（~/.chat2cli/data.json）
 ```
@@ -80,10 +81,31 @@ DeepSeek 返回 text/event-stream，内部 payload 是 JSON，用 `src/utils/sse
 - `createDeepseekDeltaDecoder` 从 JSON payload 中提取 `{ kind: "thinking" | "response", text }`
 - `bridge.js` 中的 `createThinkingTagger` 在 thinking/response 切换时插入 `<think>` / `</think>` 标签
 
+## Qwen Provider 数据流
+
+Qwen 通过邮箱 + 密码调用登录 API 获取 JWT token，后续聊天请求携带 token。
+
+```
+login → 邮箱 + 密码(SHA256) → POST /api/v2/auths/signin → JWT token
+chat  → create session → build payload → POST /api/v2/chat/completions → SSE stream
+```
+
+关键实现（`src/providers/qwen/index.js`）：
+- `buildHeaders(token)` — 构建通用请求 headers，包含 Chrome 124 UA、sec-ch-ua、Accept-Language 等
+- `_loginByPassword(email, password)` — 密码 SHA256 哈希后调用登录 API，包含 Version/source/bx-v 等登录专用 headers
+- `createChatSession(token, model)` — 创建 Qwen 会话
+- `buildQwenPayload(chatId, model, prompt)` — 构建聊天请求 payload（含 feature_config）
+- `parseQwenSseData(jsonStr)` — 参照 qwen2API 的 ParseQwenEvent()，全面解析 SSE 响应：
+  - 支持 `choices[0].delta` 中多种 reasoning 字段（reasoning_content, reasoning, reasoning_text, thinking, thoughts）
+  - 支持 `delta.extra` 子对象中的 reasoning
+  - 支持顶层 content/answer/text/delta 和 reasoning_content/reasoning/thinking
+  - 递归解析 `data` 和 `message` 子对象
+  - 返回 `Array<{ kind: "thinking" | "response", text }>`
+
 ## Server 模式（OpenAI 兼容 API）
 
-`src/server.js` 启动 HTTP 服务，将 OpenAI 格式请求桥接到 DeepSeek：
-- API Key 认证 → 通过 `resolveApiKey()` 查找已绑定的 DeepSeek 账号
+`src/server.js` 启动 HTTP 服务，将 OpenAI 格式请求桥接到后端 Provider：
+- API Key 认证 → 通过 `resolveApiKey()` 查找已绑定的 Provider 账号
 - 消息 → `buildPromptFromMessages()` 转为纯文本 prompt
 - Function Calling → `buildOpenAiPrompt()` 注入工具定义到 prompt，`streamOpenAiResponse()` 解析 XML 工具调用为 OpenAI 格式的 tool_calls delta
 
@@ -95,6 +117,7 @@ DeepSeek 返回 text/event-stream，内部 payload 是 JSON，用 `src/utils/sse
 - `config` — defaultProvider, defaultModel
 - `providers.deepseek.accounts[]` — 多账号凭据（token, userId, deviceId）
 - `providers.openai` — API Key + baseUrl
+- `providers.qwen.accounts[]` — 多账号凭据（token, email）
 - `apiKeys[]` — 分发的 API Key（可绑定到 DeepSeek 账号）
 - `conversations[]` — 本地对话历史
 
