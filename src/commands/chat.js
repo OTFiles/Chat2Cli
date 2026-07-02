@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { initProviders, getProvider } from "../providers/registry.js";
+import { initProviders, getProvider, listProviders } from "../providers/registry.js";
 import { getConfig } from "../config.js";
 import { getStore, updateStore } from "../storage/store.js";
 import { createId } from "../utils/id.js";
@@ -642,28 +642,49 @@ async function runInteractiveChat(provider, opts = {}) {
   const useMarkdown = opts.markdown !== false;
   resetMarkdownState();
 
-  if (!provider.isAuthenticated()) {
-    printError("尚未登录。请运行: chat2cli login");
+  // 收集所有服务商的已登录账号
+  const allProviders = listProviders();
+  const providerAccounts = [];
+  for (const p of allProviders) {
+    if (!p.isAuthenticated()) continue;
+    if (typeof p.listAccounts === "function") {
+      for (const a of p.listAccounts()) {
+        providerAccounts.push({ provider: p, account: a });
+      }
+    } else {
+      const a = p.getAccountInfo();
+      if (a) providerAccounts.push({ provider: p, account: a });
+    }
+  }
+
+  if (!providerAccounts.length) {
+    printError("没有已登录的账号。请运行: chat2cli login");
     return;
   }
 
-  // 多账号选择
+  // 选择账号和服务商
+  let chatProvider = provider;
   let accountId = null;
-  if (typeof provider.listAccounts === "function") {
-    const accounts = provider.listAccounts();
-    if (accounts.length > 1) {
-      const { default: inquirer } = await import("inquirer");
-      const ans = await inquirer.prompt([{
-        type: "list", name: "accountIndex", message: `选择 ${provider.label} 账号:`,
-        choices: accounts.map((a, i) => ({
-          name: accountLabel(a),
-          value: i
-        }))
-      }]);
-      accountId = accounts[ans.accountIndex].id;
-    } else if (accounts.length === 1) {
-      accountId = accounts[0].id;
-    }
+
+  if (providerAccounts.length === 1) {
+    chatProvider = providerAccounts[0].provider;
+    accountId = providerAccounts[0].account.id || null;
+  } else {
+    const { default: inquirer } = await import("inquirer");
+    const ans = await inquirer.prompt([{
+      type: "list", name: "accountIndex", message: "选择账号:",
+      choices: providerAccounts.map((pa, i) => ({
+        name: `${accountLabel(pa.account)}  [${pa.provider.label}]`,
+        value: i
+      }))
+    }]);
+    chatProvider = providerAccounts[ans.accountIndex].provider;
+    accountId = providerAccounts[ans.accountIndex].account.id || null;
+  }
+
+  if (!chatProvider.isAuthenticated()) {
+    printError("所选账号未登录。");
+    return;
   }
 
   // 显示历史记录选择器（--new / -n 参数跳过）
@@ -671,12 +692,12 @@ async function runInteractiveChat(provider, opts = {}) {
     // 直接新对话
     const currentModel = modelOverride || getConfig().defaultModel;
     const convId = createId();
-    printChatHeader(provider.label, currentModel, convId.slice(0, 8));
+    printChatHeader(chatProvider.label, currentModel, convId.slice(0, 8));
     const messages = [];
-    await chatLoop(provider, messages, currentModel, accountId, null, null, useMarkdown);
+    await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown);
     if (messages.length > 0) {
       const conv = {
-        id: convId, provider: provider.name, model: currentModel,
+        id: convId, provider: chatProvider.name, model: currentModel,
         title: buildConversationTitle(messages), messages: [...messages],
         accountId: accountId || "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
       };
@@ -686,7 +707,7 @@ async function runInteractiveChat(provider, opts = {}) {
     return;
   }
 
-  const picked = await pickConversation(provider, accountId);
+  const picked = await pickConversation(chatProvider, accountId);
 
   if (picked.action === "exit") return;  // Ctrl+C 取消
 
@@ -695,13 +716,13 @@ async function runInteractiveChat(provider, opts = {}) {
     const currentModel = modelOverride || getConfig().defaultModel;
     const convId = createId();
 
-    printChatHeader(provider.label, currentModel, convId.slice(0, 8));
+    printChatHeader(chatProvider.label, currentModel, convId.slice(0, 8));
     const messages = [];
-    await chatLoop(provider, messages, currentModel, accountId, null, null, useMarkdown);
+    await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown);
 
     if (messages.length > 0) {
       const conv = {
-        id: convId, provider: provider.name, model: currentModel,
+        id: convId, provider: chatProvider.name, model: currentModel,
         title: buildConversationTitle(messages), messages: [...messages],
         accountId: accountId || "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
       };
@@ -718,10 +739,10 @@ async function runInteractiveChat(provider, opts = {}) {
     const messages = [...conv.messages];
     const convAccountId = conv.accountId || accountId;
 
-    printChatHeader(provider.label, currentModel, conv.id.slice(0, 8));
+    printChatHeader(chatProvider.label, currentModel, conv.id.slice(0, 8));
     echoMessages(messages, useMarkdown);
 
-    await chatLoop(provider, messages, currentModel, convAccountId, null, null, useMarkdown);
+    await chatLoop(chatProvider, messages, currentModel, convAccountId, null, null, useMarkdown);
 
     if (messages.length > conv.messages.length) {
       updateStore((state) => ({
@@ -746,16 +767,16 @@ async function runInteractiveChat(provider, opts = {}) {
     // 使用 API 返回的 current_message_id 作为新消息的 parent
     const parentMsgId = picked.currentMessageId || null;
 
-    printChatHeader(provider.label, currentModel, sessionId.slice(0, 8));
+    printChatHeader(chatProvider.label, currentModel, sessionId.slice(0, 8));
     echoMessages(messages, useMarkdown);
 
-    await chatLoop(provider, messages, currentModel, dsAccountId, sessionId, parentMsgId, useMarkdown);
+    await chatLoop(chatProvider, messages, currentModel, dsAccountId, sessionId, parentMsgId, useMarkdown);
 
     if (messages.length > picked.messages.length) {
       // 保存到本地（暂存为本地对话副本）
       const convId = createId();
       const conv = {
-        id: convId, provider: provider.name, model: currentModel,
+        id: convId, provider: chatProvider.name, model: currentModel,
         title: buildConversationTitle(messages), messages: [...messages],
         accountId: dsAccountId || "", dsSessionId: sessionId,
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
