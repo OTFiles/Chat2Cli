@@ -460,14 +460,59 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
     process.stdout.write("\x1b[2A\r\x1b[J");
   }
 
+  /** 字符终端列宽（CJK 计 2 列） */
+  function charWidth(c) { return c.charCodeAt(0) > 127 ? 2 : 1; }
+
   /**
-   * raw mode 等待输入 — 手动控制回显，不依赖 readline prompt。
-   * 这样可以保证 prompt 行下方的内容（下分隔线、帮助）不被清除。
+   * raw mode 等待输入 — 支持历史导航、行内编辑、CJK 退格。
    */
   function waitForInput() {
     return new Promise((resolve) => {
       let input = "";
-      let escState = 0; // 0=normal, 1=saw ESC, 2=saw [, 3=got letter (skip)
+      let cursor = 0;         // 字符位置（0-index）
+      let historyIdx = -1;    // 当前历史位置（-1 = 正在输入）
+      let escState = 0;
+
+      function redrawPrompt() {
+        // 清除当前行从 prompt 开始的所有内容
+        process.stdout.write("\r");
+        process.stdout.write("   > ");
+        process.stdout.write(input);
+        process.stdout.write("\x1b[0K"); // 清除到行尾
+        // 将光标移到正确位置（从 prompt "   > " 之后开始计算）
+        if (cursor < input.length) {
+          const leftChars = Array.from(input.slice(cursor));
+          const leftCols = leftChars.reduce((s, c) => s + charWidth(c), 0);
+          process.stdout.write(`\x1b[${leftCols}D`);
+        }
+      }
+
+      function insertChar(char) {
+        const chars = Array.from(input);
+        chars.splice(cursor, 0, char);
+        input = chars.join("");
+        cursor++;
+      }
+
+      function deleteBefore() {
+        if (cursor <= 0) return;
+        const chars = Array.from(input);
+        const removed = chars[cursor - 1];
+        chars.splice(cursor - 1, 1);
+        input = chars.join("");
+        cursor--;
+        // 用正确宽度覆盖已删除字符
+        const w = charWidth(removed);
+        process.stdout.write("\b".repeat(w) + " ".repeat(w) + "\b".repeat(w));
+      }
+
+      function deleteAfter() {
+        const chars = Array.from(input);
+        if (cursor >= chars.length) return;
+        chars.splice(cursor, 1);
+        input = chars.join("");
+        redrawPrompt();
+      }
 
       process.stdin.setRawMode(true);
       process.stdin.resume();
@@ -477,56 +522,127 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
         for (const char of str) {
           const code = char.codePointAt(0);
 
-          // ESC 序列（箭头键等），跳过
+          // ESC 序列
           if (escState > 0) {
-            if (escState === 2 && char === "[") { escState = 3; continue; }
-            escState--;
+            if (char === "[" && escState === 1) { escState = 2; continue; }
+            if (escState === 2) {
+              if (char === "A") { // 上：历史回溯
+                if (history.length > 0 && (historyIdx < history.length - 1)) {
+                  if (historyIdx === -1) savedInput = input;
+                  historyIdx++;
+                  input = history[history.length - 1 - historyIdx];
+                  cursor = input.length;
+                  redrawPrompt();
+                }
+              } else if (char === "B") { // 下：历史前进
+                if (historyIdx >= 0) {
+                  historyIdx--;
+                  input = historyIdx >= 0 ? history[history.length - 1 - historyIdx] : (savedInput || "");
+                  cursor = input.length;
+                  if (historyIdx < 0) savedInput = "";
+                  redrawPrompt();
+                }
+              } else if (char === "C") { // 右
+                if (cursor < Array.from(input).length) {
+                  const c = Array.from(input)[cursor];
+                  process.stdout.write(`\x1b[${charWidth(c)}C`);
+                  cursor++;
+                }
+              } else if (char === "D") { // 左
+                if (cursor > 0) {
+                  const c = Array.from(input)[cursor - 1];
+                  process.stdout.write(`\x1b[${charWidth(c)}D`);
+                  cursor--;
+                }
+              } else if (char === "H") { // Home
+                const cols = cursorPosToCol();
+                process.stdout.write(`\x1b[${cols}D`);
+                cursor = 0;
+              } else if (char === "F") { // End
+                redrawPrompt();
+              }
+              escState = 0;
+              continue;
+            }
+            escState = 0;
             continue;
           }
-          if (code === 27) { escState = 2; continue; }
+          if (code === 27) { escState = 1; continue; }
 
           // Enter
           if (code === 13) {
             process.stdout.write("\r\n");
-            process.stdin.setRawMode(false);
-            process.stdin.pause();
-            process.stdin.removeListener("data", onData);
-            resolve(input.trim());
+            cleanup();
+            const text = input.trim();
+            if (text) history = [...history, text];
+            resolve(text);
             return;
           }
+
           // Backspace
           if (code === 127 || code === 8) {
-            if (input.length > 0) {
-              input = input.slice(0, -1);
-              process.stdout.write("\b \b");
-            }
+            if (cursor > 0) { deleteBefore(); redrawPrompt(); }
             continue;
           }
-          // Ctrl+C → exit
-          if (code === 3) {
-            process.stdin.setRawMode(false);
-            process.stdin.pause();
-            process.stdin.removeListener("data", onData);
-            resolve("/exit");
-            return;
+
+          // Delete (ESC[3~ is handled via ESC + [ + 3 + ~)
+          // ─ handled inline below
+
+          // Ctrl+C
+          if (code === 3) { cleanup(); resolve("/exit"); return; }
+          // Ctrl+D
+          if (code === 4) { cleanup(); resolve("/exit"); return; }
+          // Ctrl+A → Home
+          if (code === 1) {
+            const cols = cursorPosToCol();
+            process.stdout.write(`\x1b[${cols}D`);
+            cursor = 0;
+            continue;
           }
-          // Ctrl+D → exit (EOF)
-          if (code === 4) {
-            process.stdin.setRawMode(false);
-            process.stdin.pause();
-            process.stdin.removeListener("data", onData);
-            resolve("/exit");
-            return;
+          // Ctrl+E → End
+          if (code === 5) { cursor = input.length; redrawPrompt(); continue; }
+          // Ctrl+K → 删除到行尾
+          if (code === 11) {
+            const chars = Array.from(input);
+            input = chars.slice(0, cursor).join("");
+            redrawPrompt();
+            continue;
           }
+          // Ctrl+U → 删除到行首
+          if (code === 21) {
+            const chars = Array.from(input);
+            const before = chars.slice(0, cursor).join("");
+            const after = chars.slice(cursor).join("");
+            const cols = cursorPosToCol();
+            process.stdout.write(`\x1b[${cols}D`);
+            process.stdout.write(" ".repeat(cols));
+            process.stdout.write(`\x1b[${cols}D`);
+            process.stdout.write(after);
+            input = after;
+            cursor = 0;
+            redrawPrompt();
+            continue;
+          }
+
           // 可打印字符
           if (code >= 32 || code === 10) {
-            input += char;
-            process.stdout.write(char);
+            insertChar(char);
+            redrawPrompt();
           }
-          // 其他控制字符忽略
         }
       };
 
+      function cursorPosToCol() {
+        return Array.from(input).slice(0, cursor).reduce((s, c) => s + charWidth(c), 0);
+      }
+
+      function cleanup() {
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+        process.stdin.removeListener("data", onData);
+      }
+
+      let savedInput = "";
       process.stdin.on("data", onData);
     });
   }
@@ -535,6 +651,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
     drawFooter();
   }
 
+  let history = []; // 命令/对话历史
   try {
     // 初始显示 footer
     drawFooter();

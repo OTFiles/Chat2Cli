@@ -138,7 +138,7 @@ export function renderMarkdown(text, enabled = true) {
     if (codeBlock) {
       codeLineNum++;
       const num = chalk.gray(String(codeLineNum).padStart(3, " "));
-      output.push("   " + num + " " + chalk.white(line.replace(/^ {0,3}/, "")));
+      output.push("     " + num + " " + chalk.white(line.replace(/^ {0,3}/, "")));
       i++;
       continue;
     }
