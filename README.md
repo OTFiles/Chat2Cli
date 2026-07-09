@@ -315,7 +315,7 @@ export class MyProvider extends BaseProvider {
 - 聊天 payload 构建格式
 - 基于邮箱和密码登录由我实现(小小的骄傲一下www)
 
-特此感谢 TQZHR 及 qwen2API 的开源贡献。
+特此感谢 TQZHR 及 YuJunZhiXue 的开源贡献。
 
 ## License
 

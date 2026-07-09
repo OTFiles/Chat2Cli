@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { initProviders, getProvider, listProviders } from "../providers/registry.js";
-import { getConfig, setConfigKey } from "../config.js";
+import { getConfig, setConfigKey, getChatOptions } from "../config.js";
 import { getStore, updateStore } from "../storage/store.js";
 import { printSuccess, printError, printInfo, accountLabel } from "../utils/format.js";
 
@@ -25,7 +25,21 @@ async function configShow() {
 
   process.stdout.write(chalk.bold("\n当前配置:\n\n"));
   process.stdout.write(`  默认服务商: ${chalk.cyan(config.defaultProvider)}\n`);
-  process.stdout.write(`  默认模型:   ${chalk.cyan(config.defaultModel)}\n\n`);
+  process.stdout.write(`  默认模型:   ${chalk.cyan(config.defaultModel)}\n`);
+  process.stdout.write(`  新对话:     ${config.newChatOnStart ? chalk.green("每次都开始新对话") : chalk.gray("显示历史记录")}\n`);
+  process.stdout.write(`  Markdown:   ${config.markdown !== false ? chalk.green("启用") : chalk.gray("禁用")}\n`);
+  process.stdout.write(`  Thinking:   ${getChatOptions(config.defaultProvider)?.thinkingEnabled !== false ? chalk.green("启用") : chalk.gray("禁用")}\n`);
+  process.stdout.write(`  联网搜索:   ${getChatOptions(config.defaultProvider)?.enableSearch ? chalk.green("启用") : chalk.gray("禁用")}\n`);
+
+  // 显示各个 provider 的模型偏好
+  const providerModels = config?.providerModels || {};
+  if (Object.keys(providerModels).length > 0) {
+    process.stdout.write(`\n${chalk.bold("模型偏好:")}\n`);
+    for (const [pName, modelId] of Object.entries(providerModels)) {
+      process.stdout.write(`  [${chalk.cyan(pName)}] ${chalk.dim(modelId)}\n`);
+    }
+  }
+  process.stdout.write("\n");
 
   process.stdout.write(chalk.bold("可用服务商:\n\n"));
   for (const p of providers) {
@@ -65,7 +79,7 @@ async function configShow() {
 async function configSet(key, value) {
   if (!key || !value) {
     printError("用法: chat2cli config set <键> <值>");
-    printInfo("可用的键: defaultProvider, defaultModel");
+    printInfo("可用的键: defaultProvider, defaultModel, newChatOnStart, markdown");
     return;
   }
 
@@ -76,6 +90,18 @@ async function configSet(key, value) {
       printInfo(`可选: ${listProviders().map((p) => p.name).join(", ")}`);
       return;
     }
+  }
+
+  // 布尔类型的键
+  if (key === "newChatOnStart" || key === "markdown") {
+    const boolVal = value === "true" || value === "true" || value === "1" || value === "yes";
+    if (value !== "true" && value !== "false" && value !== "1" && value !== "0" && value !== "yes" && value !== "no") {
+      printError(`请使用 true/false 作为值`);
+      return;
+    }
+    setConfigKey(key, boolVal);
+    printSuccess(`已设置 ${chalk.bold(key)} = ${chalk.cyan(boolVal)}`);
+    return;
   }
 
   setConfigKey(key, value);

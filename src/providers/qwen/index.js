@@ -100,10 +100,13 @@ async function deleteChatSession(token, chatId) {
 }
 
 /** 构建 Qwen 聊天请求 payload */
-function buildQwenPayload(chatId, model, prompt, thinkingEnabled = true, enableSearch = false) {
+function buildQwenPayload(chatId, model, prompt, options = {}) {
   const ts = Math.floor(Date.now() / 1000);
   const fid = genFid();
   const childId = genFid();
+
+  const thinkingEnabled = options.thinkingEnabled !== false;
+  const enableSearch = options.enableSearch === true;
 
   const thinking = thinkingEnabled;
   const autoThinking = thinkingEnabled;
@@ -224,6 +227,9 @@ export class QwenProvider extends BaseProvider {
   async _loginByPassword(email, password) {
     const passwordHash = createHash("sha256").update(password).digest("hex");
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
     const resp = await fetch(`${QWEN_BASE_URL}/api/v2/auths/signin`, {
       method: "POST",
       headers: {
@@ -235,6 +241,7 @@ export class QwenProvider extends BaseProvider {
         Version: "0.2.68",
         source: "h5",
         "X-Request-Id": genRequestId(),
+        Timezone: new Date().toString().replace(/^.*?GMT/, "GMT"),
         "bx-v": "2.5.36",
         Origin: QWEN_BASE_URL,
         Connection: "keep-alive",
@@ -244,8 +251,8 @@ export class QwenProvider extends BaseProvider {
         Priority: "u=0",
       },
       body: JSON.stringify({ email, password: passwordHash }),
-      timeout: 15000,
-    });
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeoutId));
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
@@ -369,13 +376,16 @@ export class QwenProvider extends BaseProvider {
     const prompt = buildPromptFromMessages(messages);
 
     const chatId = await createChatSession(account.token, model);
-    const payload = buildQwenPayload(chatId, model, prompt);
+    const payload = buildQwenPayload(chatId, model, prompt, options);
+
+    const headers = buildHeaders(account.token);
+    headers.Accept = "text/event-stream";  // streaming 请求必须的 Accept
 
     const resp = await fetch(
       `${QWEN_BASE_URL}/api/v2/chat/completions?chat_id=${chatId}`,
       {
         method: "POST",
-        headers: buildHeaders(account.token),
+        headers,
         body: JSON.stringify(payload),
       }
     );
@@ -386,15 +396,21 @@ export class QwenProvider extends BaseProvider {
       throw new Error(`Qwen 请求失败 HTTP ${resp.status}: ${errText.slice(0, 200)}`);
     }
 
+    // 调试：记录响应头
+    console.error("[Qwen] Response status:", resp.status);
+    console.error("[Qwen] Content-Type:", resp.headers.get("content-type"));
+
     const decoder = new TextDecoder();
     const reader = resp.body.getReader();
     let buffer = "";
+    let rawDataReceived = false;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
+        rawDataReceived = true;
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
@@ -403,18 +419,29 @@ export class QwenProvider extends BaseProvider {
           const trimmed = line.trim();
           if (!trimmed.startsWith("data:")) continue;
           const data = trimmed.slice(5).trimStart();
-          if (!data || data === "[DONE]") continue;
+          if (!data || data === "[DONE]") {
+            if (data === "[DONE]") console.error("[Qwen] Received [DONE]");
+            continue;
+          }
+
+          // 调试：打印原始数据（前 500 字符）
+          if (data.length < 500) console.error("[Qwen] SSE data:", data);
 
           const deltas = parseQwenSseData(data);
           if (deltas) {
             for (const delta of deltas) {
               yield delta;
             }
+          } else {
+            console.error("[Qwen] Unparsed data:", data.slice(0, 300));
           }
         }
       }
     } finally {
       reader.releaseLock?.();
+      if (!rawDataReceived) {
+        console.error("[Qwen] No raw data received from SSE stream!");
+      }
       await deleteChatSession(account.token, chatId);
     }
   }
@@ -431,19 +458,19 @@ export class QwenProvider extends BaseProvider {
     const prompt = options.prompt || buildPromptFromMessages(messages);
 
     const chatId = await createChatSession(account.token, model);
-    const payload = buildQwenPayload(chatId, model, prompt);
+    const payload = buildQwenPayload(chatId, model, prompt, options);
+
+    const headers = buildHeaders(account.token);
+    headers.Accept = "text/event-stream";  // streaming 请求必须的 Accept
 
     const resp = await fetch(
       `${QWEN_BASE_URL}/api/v2/chat/completions?chat_id=${chatId}`,
       {
         method: "POST",
-        headers: buildHeaders(account.token),
+        headers,
         body: JSON.stringify(payload),
       }
     );
-
-    // 后台删除会话
-    deleteChatSession(account.token, chatId);
 
     return resp;
   }

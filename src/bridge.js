@@ -141,9 +141,21 @@ export async function* consumeRawStream(bodyStream) {
 // ═══════════════════════════════════════════════════
 
 /**
- * 将 Qwen SSE 数据行（choices[0].delta）解析为 { kind, text } delta。
- * - reasoning_content → { kind: "thinking", text }
- * - content → { kind: "response", text }
+ * 返回第一个非空字符串值（用于从多个候选字段中提取内容）。
+ */
+function firstNonEmpty(...values) {
+  for (const v of values) {
+    if (typeof v === "string" && v.trim() !== "") return v;
+  }
+  return "";
+}
+
+/**
+ * 将 Qwen SSE 数据行解析为 { kind, text } delta。
+ * 参照 qwen2API upstream/sse_consumer.go ParseQwenEvent()
+ * - 支持 delta 中多种 reasoning 字段（reasoning_content / reasoning / reasoning_text / thinking / thoughts）
+ * - 支持 extra 子对象中的 reasoning 字段
+ * - 支持顶层 fallback（content / answer / text / delta / reasoning_content / reasoning / thinking）
  */
 export function createQwenDeltaDecoder() {
   return {
@@ -151,16 +163,31 @@ export function createQwenDeltaDecoder() {
       try {
         const obj = JSON.parse(jsonStr);
         const choice = obj?.choices?.[0];
-        if (!choice) return null;
-        const delta = choice.delta;
-        if (!delta) return null;
+        if (choice?.delta) {
+          const delta = choice.delta;
+          const extra = delta.extra;
 
-        if (delta.reasoning_content) {
-          return { kind: "thinking", text: delta.reasoning_content };
+          // 检查所有可能的 reasoning 字段变体
+          const reasoning = firstNonEmpty(
+            delta.reasoning_content, delta.reasoning,
+            delta.reasoning_text, delta.thinking, delta.thoughts,
+            extra?.reasoning_content, extra?.reasoning,
+            extra?.reasoning_text, extra?.thinking, extra?.thoughts
+          );
+          if (reasoning) return { kind: "thinking", text: reasoning };
+
+          const content = firstNonEmpty(delta.content);
+          if (content) return { kind: "response", text: content };
+
+          return null;
         }
-        if (delta.content) {
-          return { kind: "response", text: delta.content };
-        }
+
+        // 顶层 fallback：某些模型直接在根级别返回字段
+        const topReasoning = firstNonEmpty(obj.reasoning_content, obj.reasoning, obj.thinking);
+        if (topReasoning) return { kind: "thinking", text: topReasoning };
+        const topContent = firstNonEmpty(obj.content, obj.answer, obj.text, obj.delta);
+        if (topContent) return { kind: "response", text: topContent };
+
         return null;
       } catch {
         return null;

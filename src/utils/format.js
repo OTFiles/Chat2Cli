@@ -117,9 +117,11 @@ export function printHelp() {
   process.stdout.write("\n");
   process.stdout.write(chalk.bold("对话模式可用命令:") + "\n");
   process.stdout.write("  " + chalk.cyan("/exit") + "    保存并退出对话\n");
+  process.stdout.write("  " + chalk.cyan("/switch") + "  列出历史对话，输入 /conv <序号> 切换\n");
   process.stdout.write("  " + chalk.cyan("/clear") + "   清空当前上下文\n");
-  process.stdout.write("  " + chalk.cyan("/model") + "   切换模型 (例: /model deepseek-chat-fast)\n");
+  process.stdout.write("  " + chalk.cyan("/model") + "   切换模型 (例: /model qwen-max)\n");
   process.stdout.write("  " + chalk.cyan("/models") + "  列出可用模型\n");
+  process.stdout.write("  " + chalk.cyan("/config") + "  查看/修改聊天参数 (thinking, search on|off)\n");
   process.stdout.write("  " + chalk.cyan("/help") + "    显示此帮助\n");
   process.stdout.write("\n");
 }

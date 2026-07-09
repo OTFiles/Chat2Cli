@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { initProviders, getProvider, listProviders } from "../providers/registry.js";
-import { getConfig } from "../config.js";
+import { getConfig, getModelForProvider, setModelForProvider, getChatOptions, setChatOption } from "../config.js";
 import { getStore, updateStore } from "../storage/store.js";
 import { createId } from "../utils/id.js";
 import {
@@ -12,6 +12,14 @@ import { renderMarkdown } from "../utils/markdown.js";
 
 function resolveProvider() {
   return getProvider(getConfig().defaultProvider);
+}
+
+/** 获取当前 provider 的默认模型 */
+function resolveModel(provider, modelOverride) {
+  if (modelOverride) return modelOverride;
+  const providerModel = getModelForProvider(provider.name);
+  if (providerModel) return providerModel;
+  return getConfig().defaultModel || provider.getModels()[0]?.id || "qwen-max";
 }
 
 function buildConversationTitle(messages) {
@@ -446,7 +454,7 @@ export function resetMarkdownState() {
   _globalState.responseStarted = false;
 }
 
-async function chatLoop(provider, messages, currentModel, accountId, sessionId = null, parentMessageId = null, markdown = true) {
+async function chatLoop(provider, messages, currentModel, accountId, sessionId = null, parentMessageId = null, markdown = true, chatOverrides = {}) {
   // ── 绘制 footer + 定位到 prompt 行 ──
   function drawFooter() {
     printFooter();
@@ -694,9 +702,101 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
         printUserMsg(input);
         if (provider.getModels().some((mod) => mod.id === m)) {
           currentModel = m;
-          process.stdout.write("   " + chalk.green("✓ ") + `模型已切换为: ${chalk.bold(m)}\n\n`);
+          setModelForProvider(provider.name, m);  // 持久化到配置文件
+          process.stdout.write("   " + chalk.green("✓ ") + `模型已切换为: ${chalk.bold(m)}` + chalk.gray("  (已保存)") + "\n\n");
         } else {
           process.stdout.write("   " + chalk.red("✗ ") + `未知模型: ${m}\n\n`);
+        }
+        redrawFooter();
+        continue;
+      }
+      if (input === "/config") {
+        printUserMsg(input);
+        const opts = getChatOptions(provider.name);
+        process.stdout.write("   " + chalk.bold("当前配置:\n"));
+        process.stdout.write("     thinking:  " + (opts.thinkingEnabled ? chalk.green("on") : chalk.gray("off")) + "\n");
+        process.stdout.write("     search:    " + (opts.enableSearch ? chalk.green("on") : chalk.gray("off")) + "\n");
+        process.stdout.write("\n   " + chalk.gray("用法: /config thinking on|off   /config search on|off\n\n"));
+        redrawFooter();
+        continue;
+      }
+      if (input.startsWith("/config ")) {
+        const parts = input.slice(8).trim().split(/\s+/);
+        const key = parts[0];
+        const val = parts[1]?.toLowerCase();
+        printUserMsg(input);
+        if ((key === "thinking" || key === "search") && (val === "on" || val === "off" || val === "true" || val === "false")) {
+          const configKey = key === "thinking" ? "thinkingEnabled" : "enableSearch";
+          const boolVal = val === "on" || val === "true";
+          setChatOption(provider.name, configKey, boolVal);
+          process.stdout.write("   " + chalk.green("✓ ") + `${key} = ${boolVal ? chalk.green("on") : chalk.gray("off")}` + chalk.gray("  (已保存)") + "\n\n");
+        } else {
+          process.stdout.write("   " + chalk.red("✗ ") + `用法: /config thinking on|off   /config search on|off\n\n`);
+        }
+        redrawFooter();
+        continue;
+      }
+      if (input === "/switch") {
+        printUserMsg(input);
+        const state = getStore();
+        const convs = state.conversations
+          .filter(c => c.provider === provider.name && c.messages?.length > 0)
+          .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+        if (convs.length === 0) {
+          process.stdout.write("   " + chalk.gray("没有历史对话，输入内容开始新对话\n\n"));
+        } else {
+          process.stdout.write("   " + chalk.bold("对话列表:\n"));
+          for (let i = 0; i < Math.min(convs.length, 20); i++) {
+            const c = convs[i];
+            const t = (c.title || "未命名").slice(0, 45);
+            const tm = formatTime(c.updatedAt || c.createdAt);
+            process.stdout.write(`     ${chalk.cyan(String(i+1).padStart(2))} ${t}  ${chalk.dim(tm)}\n`);
+          }
+          process.stdout.write(`     ${chalk.cyan(" 0")} 新对话\n`);
+          process.stdout.write(chalk.gray("   输入 /conv <序号> 切换  (例: /conv 1)\n\n"));
+        }
+        redrawFooter();
+        continue;
+      }
+      if (input.startsWith("/conv ")) {
+        const num = parseInt(input.slice(6).trim(), 10);
+        const state = getStore();
+        const convs = state.conversations
+          .filter(c => c.provider === provider.name && c.messages?.length > 0)
+          .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+        printUserMsg(input);
+        if (num === 0) {
+          // 保存当前对话（如果有内容）
+          if (messages.length > 0) {
+            saveConversation({
+              id: createId(), provider: provider.name, model: currentModel,
+              title: buildConversationTitle(messages), messages: [...messages],
+              accountId: accountId || "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+            });
+          }
+          messages.length = 0;
+          sessionId = null;
+          parentMessageId = null;
+          process.stdout.write("   " + chalk.green("✓ ") + "已开始新对话\n\n");
+        } else if (num > 0 && num <= convs.length) {
+          // 保存当前对话
+          if (messages.length > 0) {
+            saveConversation({
+              id: createId(), provider: provider.name, model: currentModel,
+              title: buildConversationTitle(messages), messages: [...messages],
+              accountId: accountId || "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+            });
+          }
+          const conv = convs[num - 1];
+          messages.length = 0;
+          messages.push(...conv.messages);
+          sessionId = conv.dsSessionId || null;
+          accountId = conv.accountId || accountId;
+          currentModel = conv.model || currentModel;
+          process.stdout.write("   " + chalk.green("✓ ") + `已切换到: ${chalk.bold(conv.title || "未命名")}\n\n`);
+          echoMessages(conv.messages, useMarkdown);
+        } else {
+          process.stdout.write("   " + chalk.red("✗ ") + `无效序号: ${num}  使用 /switch 查看列表\n\n`);
         }
         redrawFooter();
         continue;
@@ -718,8 +818,9 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
 
       messages.push({ role: "user", content: input });
 
+      const chatOpts = getChatOptions(provider.name);
       const result = await streamResponse(
-        provider, messages, { model: currentModel, accountId, sessionId, parentMessageId, markdown }
+        provider, messages, { model: currentModel, accountId, sessionId, parentMessageId, markdown, ...chatOpts, ...chatOverrides }
       ).catch((err) => {
         process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
         return null;
@@ -756,7 +857,9 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
 
 async function runInteractiveChat(provider, opts = {}) {
   const { model: modelOverride } = opts;
-  const useMarkdown = opts.markdown !== false;
+  const config = getConfig();
+  const useMarkdown = opts.markdown !== false && config.markdown !== false;  // CLI --no-markdown 或配置均可关闭
+  const skipPicker = skipPicker || config.newChatOnStart === true;  // --new 或配置均可跳过历史
   resetMarkdownState();
 
   // 收集所有服务商的已登录账号
@@ -805,9 +908,9 @@ async function runInteractiveChat(provider, opts = {}) {
   }
 
   // 显示历史记录选择器（--new / -n 参数跳过）
-  if (opts.skipPicker) {
+  if (skipPicker) {
     // 直接新对话
-    const currentModel = modelOverride || getConfig().defaultModel;
+    const currentModel = modelOverride || resolveModel(chatProvider);
     const convId = createId();
     printChatHeader(chatProvider.label, currentModel, convId.slice(0, 8));
     const messages = [];
@@ -830,7 +933,7 @@ async function runInteractiveChat(provider, opts = {}) {
 
   if (picked.action === "new") {
     // 全新对话
-    const currentModel = modelOverride || getConfig().defaultModel;
+    const currentModel = modelOverride || resolveModel(chatProvider);
     const convId = createId();
 
     printChatHeader(chatProvider.label, currentModel, convId.slice(0, 8));
@@ -852,7 +955,7 @@ async function runInteractiveChat(provider, opts = {}) {
   if (picked.action === "local") {
     // 继续本地对话
     const conv = picked.conv;
-    const currentModel = modelOverride || conv.model || getConfig().defaultModel;
+    const currentModel = modelOverride || conv.model || resolveModel(chatProvider);
     const messages = [...conv.messages];
     const convAccountId = conv.accountId || accountId;
 
@@ -877,7 +980,7 @@ async function runInteractiveChat(provider, opts = {}) {
 
   if (picked.action === "ds") {
     // 继续云端会话
-    const currentModel = modelOverride || getConfig().defaultModel;
+    const currentModel = modelOverride || resolveModel(chatProvider);
     const sessionId = picked.sessionId;
     const messages = [...picked.messages];
     const dsAccountId = picked.account?.id || accountId;
@@ -907,7 +1010,7 @@ async function runInteractiveChat(provider, opts = {}) {
 
 async function runOneshotChat(provider, message, opts = {}) {
   const { model: modelOverride } = opts;
-  const currentModel = modelOverride || getConfig().defaultModel;
+  const currentModel = modelOverride || resolveModel(chatProvider);
   const messages = [{ role: "user", content: message }];
 
   if (!provider.isAuthenticated()) { printError("尚未登录。请运行: chat2cli login"); return; }

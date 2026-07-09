@@ -2,7 +2,14 @@ import inquirer from "inquirer";
 import chalk from "chalk";
 import ora from "ora";
 import { initProviders, getProvider, listProviders } from "../providers/registry.js";
+import { setConfigKey } from "../config.js";
 import { printSuccess, printError, printInfo, accountLabel } from "../utils/format.js";
+
+/** 登录成功后自动切换默认服务商（并写入配置） */
+function autoSwitchProvider(providerName) {
+  setConfigKey("defaultProvider", providerName);
+  printInfo(`默认服务商已切换为: ${chalk.bold(providerName)}`);
+}
 
 async function loginDeepseek(provider) {
   // 显示已有账号
@@ -38,6 +45,7 @@ async function loginDeepseek(provider) {
 
     const total = provider.listAccounts().length;
     printSuccess(`已登录: ${chalk.bold(accountLabel(account))} (共 ${total} 个账号)`);
+    autoSwitchProvider(provider.name);
   } catch (err) {
     spinner.fail("登录失败");
     printError(err.message);
@@ -95,6 +103,7 @@ async function loginQwen(provider) {
 
       const total = provider.listAccounts().length;
       printSuccess(`已登录: ${chalk.bold(accountLabel(account))} (共 ${total} 个账号)`);
+      autoSwitchProvider(provider.name);
     } catch (err) {
       spinner.fail("登录失败");
       printError(err.message);
@@ -126,6 +135,7 @@ async function loginQwen(provider) {
 
     const total = provider.listAccounts().length;
     printSuccess(`已登录: ${chalk.bold(accountLabel(account))} (共 ${total} 个账号)`);
+    autoSwitchProvider(provider.name);
   } catch (err) {
     spinner.fail("登录失败");
     printError(err.message);
@@ -154,6 +164,7 @@ async function loginOpenAI(provider) {
     const account = await provider.login(answers);
     spinner.succeed("保存成功");
     printSuccess(`OpenAI 已配置。使用地址: ${chalk.bold(account.baseUrl)}`);
+    autoSwitchProvider(provider.name);
   } catch (err) {
     spinner.fail("保存失败");
     printError(err.message);

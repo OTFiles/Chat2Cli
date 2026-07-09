@@ -115,7 +115,8 @@ program
 ${chalk.dim("用法:")}
   ${chalk.cyan("config")}                 查看当前配置
   ${chalk.cyan("config set <键> <值>")}    设置配置项
-  ${chalk.cyan("                          可设置: defaultProvider, defaultModel")}
+  ${chalk.cyan("                          defaultProvider / defaultModel")}
+  ${chalk.cyan("                          newChatOnStart  / markdown (true|false)")}
   ${chalk.cyan("config account-name")}    给已登录的账号命名
   `)
   .action(async (cmd, key, value) => {
