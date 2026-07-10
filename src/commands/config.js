@@ -94,7 +94,7 @@ async function configSet(key, value) {
 
   // 布尔类型的键
   if (key === "newChatOnStart" || key === "markdown") {
-    const boolVal = value === "true" || value === "true" || value === "1" || value === "yes";
+    const boolVal = value === "true" || value === "1" || value === "yes";
     if (value !== "true" && value !== "false" && value !== "1" && value !== "0" && value !== "yes" && value !== "no") {
       printError(`请使用 true/false 作为值`);
       return;

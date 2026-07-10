@@ -8,7 +8,7 @@ import {
   printChatHeader, printFooter,
   printUserMsg, printThinkingLabel, accountLabel
 } from "../utils/format.js";
-import { renderMarkdown } from "../utils/markdown.js";
+import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
 function resolveProvider() {
   return getProvider(getConfig().defaultProvider);
@@ -452,6 +452,7 @@ function renderLine(line, needsIndent, fullResponse) {
 // 每次新对话重置状态
 export function resetMarkdownState() {
   _globalState.responseStarted = false;
+  resetMarkdownRenderer();
 }
 
 async function chatLoop(provider, messages, currentModel, accountId, sessionId = null, parentMessageId = null, markdown = true, chatOverrides = {}) {
@@ -859,7 +860,7 @@ async function runInteractiveChat(provider, opts = {}) {
   const { model: modelOverride } = opts;
   const config = getConfig();
   const useMarkdown = opts.markdown !== false && config.markdown !== false;  // CLI --no-markdown 或配置均可关闭
-  const skipPicker = skipPicker || config.newChatOnStart === true;  // --new 或配置均可跳过历史
+  const skipPicker = opts.skipPicker || config.newChatOnStart === true;  // --new 或配置均可跳过历史
   resetMarkdownState();
 
   // 收集所有服务商的已登录账号
@@ -1010,7 +1011,7 @@ async function runInteractiveChat(provider, opts = {}) {
 
 async function runOneshotChat(provider, message, opts = {}) {
   const { model: modelOverride } = opts;
-  const currentModel = modelOverride || resolveModel(chatProvider);
+  const currentModel = modelOverride || resolveModel(provider);
   const messages = [{ role: "user", content: message }];
 
   if (!provider.isAuthenticated()) { printError("尚未登录。请运行: chat2cli login"); return; }

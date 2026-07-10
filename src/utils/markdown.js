@@ -2,6 +2,21 @@ import chalk from "chalk";
 
 const HR_CHAR = "─";
 
+// ── 全局流式渲染状态（跨 renderMarkdown 调用持久化）──
+
+let _codeBlock = false;
+let _codeLang = "";
+let _codeLineNum = 0;
+let _tableLines = [];
+
+/** 重置流式渲染状态（新对话开始时调用） */
+export function resetMarkdownRenderer() {
+  _codeBlock = false;
+  _codeLang = "";
+  _codeLineNum = 0;
+  _tableLines = [];
+}
+
 // ── 内联渲染 ──
 
 function renderInline(text) {
@@ -91,23 +106,18 @@ export function renderMarkdown(text, enabled = true) {
 
   const lines = text.split("\n");
   const output = [];
-  let codeBlock = false;
-  let codeLang = "";
-  let codeLineNum = 0;
-  let tableLines = [];
-  let blockquote = false;
   let i = 0;
 
   function flushTable() {
-    if (tableLines.length > 0) {
+    if (_tableLines.length > 0) {
       // 检查是否真的是表格（有 | 分隔符行）
-      const hasSep = tableLines.some((l) => /^\|[\s\-:|]+\|$/.test(l.trim()) || /^\|[-\s:|]+\|$/.test(l.trim()));
+      const hasSep = _tableLines.some((l) => /^\|[\s\-:|]+\|$/.test(l.trim()) || /^\|[-\s:|]+\|$/.test(l.trim()));
       if (hasSep) {
-        output.push(renderTable(tableLines));
+        output.push(renderTable(_tableLines));
       } else {
-        output.push(...tableLines.map((l) => "   " + renderInline(l)));
+        output.push(..._tableLines.map((l) => "   " + renderInline(l)));
       }
-      tableLines = [];
+      _tableLines = [];
     }
   }
 
@@ -117,27 +127,27 @@ export function renderMarkdown(text, enabled = true) {
     // 代码块
     if (line.trimStart().startsWith("```")) {
       flushTable();
-      if (!codeBlock) {
-        codeLang = line.trimStart().slice(3).trim().toUpperCase();
-        codeBlock = true;
-        codeLineNum = 0;
+      if (!_codeBlock) {
+        _codeLang = line.trimStart().slice(3).trim().toUpperCase();
+        _codeBlock = true;
+        _codeLineNum = 0;
         const hr = HR_CHAR.repeat(process.stdout.columns - 3 || 72);
-        const langLabel = codeLang ? " " + chalk.bold(codeLang) + " " : " ";
+        const langLabel = _codeLang ? " " + chalk.bold(_codeLang) + " " : " ";
         output.push(chalk.dim("   " + langLabel + hr.slice(langLabel.length + 3)));
       } else {
         const hr = HR_CHAR.repeat(process.stdout.columns - 3 || 72);
         output.push(chalk.dim("   " + hr));
-        codeBlock = false;
-        codeLang = "";
-        codeLineNum = 0;
+        _codeBlock = false;
+        _codeLang = "";
+        _codeLineNum = 0;
       }
       i++;
       continue;
     }
 
-    if (codeBlock) {
-      codeLineNum++;
-      const num = chalk.gray(String(codeLineNum).padStart(3, " "));
+    if (_codeBlock) {
+      _codeLineNum++;
+      const num = chalk.gray(String(_codeLineNum).padStart(3, " "));
       output.push("     " + num + " " + chalk.white(line.replace(/^ {0,3}/, "")));
       i++;
       continue;
@@ -157,18 +167,18 @@ export function renderMarkdown(text, enabled = true) {
     // 表格行（检测 | 开头的行）
     if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
       flushTable();
-      tableLines.push(line);
+      _tableLines.push(line);
       i++;
       // 收集连续表格行
       while (i < lines.length && lines[i].trimStart().startsWith("|") && lines[i].trim().endsWith("|")) {
-        tableLines.push(lines[i]);
+        _tableLines.push(lines[i]);
         i++;
       }
       continue;
     }
 
     // 表格行可能在中间（有 --- | --- 分隔符）
-    if (tableLines.length > 0 && !trimmed.startsWith("|")) {
+    if (_tableLines.length > 0 && !trimmed.startsWith("|")) {
       flushTable();
     }
 
