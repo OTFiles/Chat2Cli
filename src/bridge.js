@@ -7,11 +7,6 @@
 import { randomUUID } from "node:crypto";
 import { createDeepseekDeltaDecoder, createSseParser } from "./utils/sse.js";
 
-// ── Constants ──
-
-const THINK_OPEN = "<think>\n";
-const THINK_CLOSE = "\n</think>\n";
-
 // ── Prompt 构建（基本）──
 
 export function buildPromptFromMessages(messages) {
@@ -54,46 +49,18 @@ export function buildChatCompletionBody({ sessionId, prompt, model }) {
   };
 }
 
-// ── Thinking 标签包装（已添加换行支持）──
+// ── 流式响应消费者（yield { kind, text } deltas）──
 
-function createThinkingTagger() {
-  let currentKind = "response";
-
-  return {
-    flush() {
-      if (currentKind === "thinking") {
-        currentKind = "response";
-        return THINK_CLOSE;
-      }
-      return "";
-    },
-    push(delta) {
-      if (!delta?.text) return "";
-      let prefix = "";
-      if (delta.kind !== currentKind) {
-        if (currentKind === "thinking") prefix += THINK_CLOSE;
-        if (delta.kind === "thinking") prefix += THINK_OPEN;
-        currentKind = delta.kind;
-      }
-      return prefix + delta.text;
-    }
-  };
-}
-
-// ── 流式响应消费者（带 thinking 标签）──
-
-async function consumeTaggedStream(bodyStream, onText) {
+async function consumeStream(bodyStream, onDelta) {
   if (!bodyStream) return;
 
   const decoder = new TextDecoder();
   const deltaDecoder = createDeepseekDeltaDecoder();
-  const tagger = createThinkingTagger();
   const parser = createSseParser(({ data }) => {
     if (!data) return;
     try {
       const delta = deltaDecoder.consume(data);
-      const text = tagger.push(delta);
-      if (text) onText(text);
+      if (delta) onDelta(delta);
     } catch {
       // skip unparseable frames
     }
@@ -103,8 +70,6 @@ async function consumeTaggedStream(bodyStream, onText) {
     parser.push(decoder.decode(chunk, { stream: true }));
   }
   parser.flush();
-  const suffix = tagger.flush();
-  if (suffix) onText(suffix);
 }
 
 // ── 流式响应（原始 deltas，无标签，供 CLI 使用）──
@@ -226,20 +191,18 @@ export function createQwenDeltaDecoder() {
 }
 
 /**
- * 消费 Qwen 的 SSE 流，在 thinking / response 切换时插入 <think> 标签。
+ * 消费 Qwen 的 SSE 流，yield { kind, text } deltas。
  */
-export async function consumeQwenStream(bodyStream, onText) {
+export async function consumeQwenStream(bodyStream, onDelta) {
   if (!bodyStream) return;
 
   const decoder = new TextDecoder();
   const deltaDecoder = createQwenDeltaDecoder();
-  const tagger = createThinkingTagger();
   const parser = createSseParser(({ data }) => {
     if (!data) return;
     try {
       const delta = deltaDecoder.consume(data);
-      const text = tagger.push(delta);
-      if (text) onText(text);
+      if (delta) onDelta(delta);
     } catch {
       // skip unparseable frames
     }
@@ -249,8 +212,6 @@ export async function consumeQwenStream(bodyStream, onText) {
     parser.push(decoder.decode(chunk, { stream: true }));
   }
   parser.flush();
-  const suffix = tagger.flush();
-  if (suffix) onText(suffix);
 }
 
 // ═══════════════════════════════════════════════════
@@ -874,13 +835,19 @@ export async function streamOpenAiResponse({ bodyStream, model, response, toolNa
     toolCallIndex += calls.length;
   };
 
-  await consumeTaggedStream(bodyStream, (text) => {
-    if (!toolSieve) {
-      writeSse(buildChunkPayload(completionId, model, { content: text }));
+  await consumeStream(bodyStream, (delta) => {
+    if (delta.kind === "thinking") {
+      writeSse(buildChunkPayload(completionId, model, { reasoning_content: delta.text }));
       return;
     }
 
-    const events = toolSieve.push(text);
+    // response kind: 内容文本，需经过工具拦截器处理
+    if (!toolSieve) {
+      writeSse(buildChunkPayload(completionId, model, { content: delta.text }));
+      return;
+    }
+
+    const events = toolSieve.push(delta.text);
     for (const event of events) {
       if (event.type === "tool_calls") {
         emitToolCalls(event.calls ?? []);
@@ -910,10 +877,15 @@ export async function streamOpenAiResponse({ bodyStream, model, response, toolNa
 // ── 收集完整响应（非流式, 支持工具调用）──
 
 export async function collectOpenAiResponse({ bodyStream, model, toolNames = [] }) {
+  let reasoningContent = "";
   let rawContent = "";
 
-  await consumeTaggedStream(bodyStream, (text) => {
-    rawContent += text;
+  await consumeStream(bodyStream, (delta) => {
+    if (delta.kind === "thinking") {
+      reasoningContent += delta.text;
+    } else {
+      rawContent += delta.text;
+    }
   });
 
   const hasTools = toolNames.length > 0;
@@ -926,6 +898,14 @@ export async function collectOpenAiResponse({ bodyStream, model, toolNames = [] 
     toolCalls = parsed.toolCalls;
   }
 
+  const message = {
+    role: "assistant",
+    content: content.length ? content : null
+  };
+  if (reasoningContent) {
+    message.reasoning_content = reasoningContent;
+  }
+
   if (toolCalls.length > 0) {
     return {
       id: createCompletionId(),
@@ -936,7 +916,7 @@ export async function collectOpenAiResponse({ bodyStream, model, toolNames = [] 
         index: 0,
         finish_reason: "tool_calls",
         message: {
-          role: "assistant",
+          ...message,
           content: content.length ? content : null,
           tool_calls: createChatToolCalls(toolCalls)
         }
@@ -952,7 +932,7 @@ export async function collectOpenAiResponse({ bodyStream, model, toolNames = [] 
     choices: [{
       index: 0,
       finish_reason: "stop",
-      message: { role: "assistant", content }
+      message
     }]
   };
 }
@@ -991,13 +971,19 @@ export async function streamQwenOpenAiResponse({ bodyStream, model, response, to
     toolCallIndex += calls.length;
   };
 
-  await consumeQwenStream(bodyStream, (text) => {
-    if (!toolSieve) {
-      writeSse(buildChunkPayload(completionId, model, { content: text }));
+  await consumeQwenStream(bodyStream, (delta) => {
+    if (delta.kind === "thinking") {
+      writeSse(buildChunkPayload(completionId, model, { reasoning_content: delta.text }));
       return;
     }
 
-    const events = toolSieve.push(text);
+    // response kind: 内容文本，需经过工具拦截器处理
+    if (!toolSieve) {
+      writeSse(buildChunkPayload(completionId, model, { content: delta.text }));
+      return;
+    }
+
+    const events = toolSieve.push(delta.text);
     for (const event of events) {
       if (event.type === "tool_calls") {
         emitToolCalls(event.calls ?? []);
@@ -1023,10 +1009,15 @@ export async function streamQwenOpenAiResponse({ bodyStream, model, response, to
 }
 
 export async function collectQwenOpenAiResponse({ bodyStream, model, toolNames = [] }) {
+  let reasoningContent = "";
   let rawContent = "";
 
-  await consumeQwenStream(bodyStream, (text) => {
-    rawContent += text;
+  await consumeQwenStream(bodyStream, (delta) => {
+    if (delta.kind === "thinking") {
+      reasoningContent += delta.text;
+    } else {
+      rawContent += delta.text;
+    }
   });
 
   const hasTools = toolNames.length > 0;
@@ -1039,6 +1030,14 @@ export async function collectQwenOpenAiResponse({ bodyStream, model, toolNames =
     toolCalls = parsed.toolCalls;
   }
 
+  const message = {
+    role: "assistant",
+    content: content.length ? content : null
+  };
+  if (reasoningContent) {
+    message.reasoning_content = reasoningContent;
+  }
+
   if (toolCalls.length > 0) {
     return {
       id: createCompletionId(),
@@ -1049,7 +1048,7 @@ export async function collectQwenOpenAiResponse({ bodyStream, model, toolNames =
         index: 0,
         finish_reason: "tool_calls",
         message: {
-          role: "assistant",
+          ...message,
           content: content.length ? content : null,
           tool_calls: createChatToolCalls(toolCalls)
         }
@@ -1065,7 +1064,7 @@ export async function collectQwenOpenAiResponse({ bodyStream, model, toolNames =
     choices: [{
       index: 0,
       finish_reason: "stop",
-      message: { role: "assistant", content }
+      message
     }]
   };
 }
