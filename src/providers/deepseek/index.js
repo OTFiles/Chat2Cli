@@ -81,6 +81,20 @@ export class DeepSeekProvider extends BaseProvider {
     return !!(info && info.token);
   }
 
+  removeAccount(accountId) {
+    let removed = null;
+    updateStore((state) => {
+      const providers = { ...state.providers };
+      const existing = providers.deepseek?.accounts || [];
+      const idx = existing.findIndex((a) => a.id === accountId);
+      if (idx < 0) return state;
+      removed = existing[idx];
+      providers.deepseek = { ...providers.deepseek, accounts: existing.filter((_, i) => i !== idx) };
+      return { ...state, providers };
+    });
+    return removed;
+  }
+
   /** 异步聊天（CLI 用） */
   async *chat(messages, options = {}) {
     const account = this.getAccountInfo(options.accountId);

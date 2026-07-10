@@ -37,6 +37,10 @@ export class BaseProvider {
     return null;
   }
 
+  deleteAccount(accountId) {
+    throw new Error("deleteAccount() not implemented");
+  }
+
   async deleteChatSession(sessionId) {
     return null;
   }

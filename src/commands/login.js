@@ -5,6 +5,45 @@ import { initProviders, getProvider, listProviders } from "../providers/registry
 import { setConfigKey } from "../config.js";
 import { printSuccess, printError, printInfo, accountLabel } from "../utils/format.js";
 
+/** 交互式删除账号（多账号 provider） */
+async function interactiveDeleteAccount(provider) {
+  const accounts = provider.listAccounts();
+  if (!accounts.length) {
+    printInfo("没有可删除的账号");
+    return;
+  }
+
+  const { default: inquirer } = await import("inquirer");
+  const { target } = await inquirer.prompt([{
+    type: "list",
+    name: "target",
+    message: "选择要删除的账号:",
+    choices: [
+      ...accounts.map((a, i) => ({
+        name: `${i + 1}. ${accountLabel(a)}`,
+        value: a.id
+      })),
+      { name: "取消", value: null }
+    ]
+  }]);
+
+  if (!target) { printInfo("已取消"); return; }
+
+  const { confirm } = await inquirer.prompt([{
+    type: "confirm",
+    name: "confirm",
+    message: `确认删除账号 "${accountLabel(accounts.find(a => a.id === target))}"？`,
+    default: false
+  }]);
+
+  if (!confirm) { printInfo("已取消"); return; }
+
+  const removed = provider.removeAccount(target);
+  if (removed) {
+    printSuccess(`已删除账号: ${accountLabel(removed)}`);
+  }
+}
+
 /** 登录成功后自动切换默认服务商（并写入配置） */
 function autoSwitchProvider(providerName) {
   setConfigKey("defaultProvider", providerName);
@@ -20,6 +59,23 @@ async function loginDeepseek(provider) {
       process.stdout.write(chalk.gray(`  - ${accountLabel(a)}\n`));
     }
     process.stdout.write("\n");
+
+    const { default: inquirer } = await import("inquirer");
+    const { action } = await inquirer.prompt([{
+      type: "list",
+      name: "action",
+      message: "选择操作:",
+      choices: [
+        { name: "添加新账号", value: "add" },
+        { name: "删除已有账号", value: "delete" },
+        { name: "取消", value: "cancel" }
+      ]
+    }]);
+    if (action === "cancel") return;
+    if (action === "delete") {
+      await interactiveDeleteAccount(provider);
+      return;
+    }
   }
 
   const answers = await inquirer.prompt([
@@ -61,6 +117,23 @@ async function loginQwen(provider) {
       process.stdout.write(chalk.gray(`  - ${accountLabel(a)}\n`));
     }
     process.stdout.write("\n");
+
+    const { default: inquirer } = await import("inquirer");
+    const { action } = await inquirer.prompt([{
+      type: "list",
+      name: "action",
+      message: "选择操作:",
+      choices: [
+        { name: "添加新账号", value: "add" },
+        { name: "删除已有账号", value: "delete" },
+        { name: "取消", value: "cancel" }
+      ]
+    }]);
+    if (action === "cancel") return;
+    if (action === "delete") {
+      await interactiveDeleteAccount(provider);
+      return;
+    }
   }
 
   // 选择登录方式
@@ -143,6 +216,38 @@ async function loginQwen(provider) {
 }
 
 async function loginOpenAI(provider) {
+  const existing = provider.getAccountInfo();
+  if (existing?.apiKey) {
+    printInfo(`当前已配置 OpenAI:`);
+    process.stdout.write(chalk.gray(`  - ${accountLabel(existing)}\n\n`));
+
+    const { default: inquirer } = await import("inquirer");
+    const { action } = await inquirer.prompt([{
+      type: "list",
+      name: "action",
+      message: "选择操作:",
+      choices: [
+        { name: "重新配置", value: "add" },
+        { name: "删除配置", value: "delete" },
+        { name: "取消", value: "cancel" }
+      ]
+    }]);
+    if (action === "cancel") return;
+    if (action === "delete") {
+      const { confirm } = await inquirer.prompt([{
+        type: "confirm",
+        name: "confirm",
+        message: "确认删除 OpenAI 配置？",
+        default: false
+      }]);
+      if (confirm) {
+        provider.removeAccount();
+        printSuccess("OpenAI 配置已删除");
+      }
+      return;
+    }
+  }
+
   const answers = await inquirer.prompt([
     {
       type: "password",

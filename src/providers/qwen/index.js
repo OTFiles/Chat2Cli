@@ -6,23 +6,13 @@ import { buildPromptFromMessages } from "../../bridge.js";
 
 const QWEN_BASE_URL = "https://chat.qwen.ai";
 
-const QWEN_MODELS = [
-  { id: "qwen-max", label: "Qwen Max" },
-  { id: "qwen-plus", label: "Qwen Plus" },
-  { id: "qwen-turbo", label: "Qwen Turbo" },
-  { id: "qwen3-max", label: "Qwen3 Max" },
-  { id: "qwen3-plus", label: "Qwen3 Plus" },
-  { id: "qwen3-turbo", label: "Qwen3 Turbo" },
-  { id: "qwen3-coder", label: "Qwen3 Coder" },
-  { id: "qwen3.5-coder", label: "Qwen3.5 Coder" },
-  { id: "qwen-coder-plus", label: "Qwen Coder Plus" },
-  { id: "qwen-coder-turbo", label: "Qwen Coder Turbo" },
-  { id: "qwen2.5-coder", label: "Qwen2.5 Coder" },
-  { id: "qwq-plus", label: "QwQ Plus" },
-  { id: "qwq-plus-latest", label: "QwQ Plus Latest" },
-  { id: "qwq", label: "QwQ" },
-  { id: "qwen-vl-max", label: "Qwen VL Max" },
-  { id: "qwen-vl-plus", label: "Qwen VL Plus" },
+/** 静态兜底模型列表（失效时使用动态拉取的列表覆盖） */
+let QWEN_MODELS = [
+  { id: "qwen3.7-max", label: "Qwen 3.7 Max" },
+  { id: "qwen3.7-plus", label: "Qwen 3.7 Plus" },
+  { id: "qwen3.6-plus", label: "Qwen 3.6 Plus" },
+  { id: "qwen3.5-plus", label: "Qwen 3.5 Plus" },
+  { id: "qwen3.5-flash", label: "Qwen 3.5 Flash" },
 ];
 
 function genRequestId() {
@@ -163,22 +153,52 @@ function buildQwenPayload(chatId, model, prompt, options = {}) {
  * 参照 qwen2API ParseQwenEvent() 支持多种响应格式
  * @returns {Array<{kind: string, text: string}>|null}
  */
+/** 将 extra 中的 summary_title / summary_thought 的 content 数组展开为 thinking 文本 */
+function extractSummaryThinking(extra) {
+  if (!extra) return "";
+  const parts = [];
+  for (const key of ["summary_title", "summary_thought"]) {
+    const val = extra[key];
+    if (!val) continue;
+    const items = val?.content;
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        if (typeof item === "string" && item.trim()) parts.push(item.trim());
+      }
+    } else if (typeof items === "string" && items.trim()) {
+      parts.push(items.trim());
+    }
+  }
+  return parts.join("\n");
+}
+
 function parseQwenSseData(jsonStr) {
   try {
     const obj = JSON.parse(jsonStr);
     const events = [];
+
+    // 跳过 response.created 等元数据事件
+    if (obj["response.created"]) return null;
 
     // 1. 处理 choices[0].delta
     const choice = obj?.choices?.[0];
     if (choice?.delta) {
       const delta = choice.delta;
       const extra = delta.extra;
+
+      // reasoning 字段（多种变体）
       const reasoning = firstString(delta.reasoning_content, delta.reasoning,
         delta.reasoning_text, delta.thinking, delta.thoughts,
         extra?.reasoning_content, extra?.reasoning,
         extra?.reasoning_text, extra?.thinking, extra?.thoughts);
+
+      // thinking_summary 阶段：extra.summary_title / extra.summary_thought
+      const summaryThinking = extractSummaryThinking(extra);
+      const allThinking = [reasoning, summaryThinking].filter(Boolean).join("\n");
+
       const content = delta.content || "";
-      if (reasoning) events.push({ kind: "thinking", text: reasoning });
+
+      if (allThinking) events.push({ kind: "thinking", text: allThinking });
       if (content) events.push({ kind: "response", text: content });
     }
 
@@ -355,6 +375,20 @@ export class QwenProvider extends BaseProvider {
     return this.getAccountInfo();
   }
 
+  removeAccount(accountId) {
+    let removed = null;
+    updateStore((state) => {
+      const providers = { ...state.providers };
+      const existing = providers.qwen?.accounts || [];
+      const idx = existing.findIndex((a) => a.id === accountId);
+      if (idx < 0) return state;
+      removed = existing[idx];
+      providers.qwen = { ...providers.qwen, accounts: existing.filter((_, i) => i !== idx) };
+      return { ...state, providers };
+    });
+    return removed;
+  }
+
   isAuthenticated() {
     const info = this.getDefaultAccount();
     return !!(info && info.token);
@@ -362,7 +396,49 @@ export class QwenProvider extends BaseProvider {
 
   // ── models ──
 
+  /** 缓存从 Qwen API 动态拉取的模型列表 */
+  _cachedModels = null;
+  _modelsLastFetch = 0;
+
+  /**
+   * 从 Qwen API 动态获取真实模型列表（参照 qwen2API /api/models）
+   * 结果缓存 30 分钟。失败时回退到硬编码列表。
+   */
+  async _fetchModels(token) {
+    const now = Date.now();
+    if (this._cachedModels && (now - this._modelsLastFetch) < 30 * 60 * 1000) {
+      return this._cachedModels;
+    }
+    try {
+      const resp = await fetch(`${QWEN_BASE_URL}/api/models`, {
+        headers: buildHeaders(token),
+      });
+      if (resp.ok) {
+        const raw = await resp.json();
+        // 响应可能是 { data: [...] } 或直接数组
+        const list = Array.isArray(raw) ? raw : (raw?.data || raw?.models || []);
+        if (Array.isArray(list) && list.length > 0) {
+          const models = list.map(item => ({
+            id: item.id || item.model || item.name || "",
+            label: item.display_name || item.displayName || item.name || item.id || "",
+          })).filter(m => m.id);
+          if (models.length > 0) {
+            this._cachedModels = models;
+            this._modelsLastFetch = now;
+            return models;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("[Qwen] Failed to fetch models:", e.message);
+    }
+    // 回退到硬编码列表
+    return QWEN_MODELS;
+  }
+
   getModels() {
+    // 同步返回：优先用缓存，否则用硬编码（异步版本通过 _fetchModels 获取）
+    if (this._cachedModels) return this._cachedModels;
     return QWEN_MODELS;
   }
 
@@ -372,7 +448,9 @@ export class QwenProvider extends BaseProvider {
     const account = this.getAccountInfo(options.accountId);
     if (!account) throw new Error("未登录 Qwen，请先运行 chat2cli login");
 
-    const model = options.model || "qwen-max";
+    // 懒拉取真实模型列表，确保模型 ID 有效
+    const realModels = await this._fetchModels(account.token);
+    const model = options.model || realModels[0]?.id;
     const prompt = buildPromptFromMessages(messages);
 
     const chatId = await createChatSession(account.token, model);
@@ -396,21 +474,25 @@ export class QwenProvider extends BaseProvider {
       throw new Error(`Qwen 请求失败 HTTP ${resp.status}: ${errText.slice(0, 200)}`);
     }
 
-    // 调试：记录响应头
-    console.error("[Qwen] Response status:", resp.status);
-    console.error("[Qwen] Content-Type:", resp.headers.get("content-type"));
+    const contentType = resp.headers.get("content-type") || "";
+
+    // 若返回的不是 SSE 流，读取完整 body 并报错
+    if (!contentType.includes("text/event-stream")) {
+      const fullBody = await resp.text().catch(() => "<read failed>");
+      console.error("[Qwen] Non-SSE response:", fullBody.slice(0, 500));
+      await deleteChatSession(account.token, chatId);
+      throw new Error(`Qwen 请求错误: ${fullBody.slice(0, 150)}`);
+    }
 
     const decoder = new TextDecoder();
     const reader = resp.body.getReader();
     let buffer = "";
-    let rawDataReceived = false;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        rawDataReceived = true;
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
@@ -419,29 +501,18 @@ export class QwenProvider extends BaseProvider {
           const trimmed = line.trim();
           if (!trimmed.startsWith("data:")) continue;
           const data = trimmed.slice(5).trimStart();
-          if (!data || data === "[DONE]") {
-            if (data === "[DONE]") console.error("[Qwen] Received [DONE]");
-            continue;
-          }
-
-          // 调试：打印原始数据（前 500 字符）
-          if (data.length < 500) console.error("[Qwen] SSE data:", data);
+          if (!data || data === "[DONE]") continue;
 
           const deltas = parseQwenSseData(data);
           if (deltas) {
             for (const delta of deltas) {
               yield delta;
             }
-          } else {
-            console.error("[Qwen] Unparsed data:", data.slice(0, 300));
           }
         }
       }
     } finally {
       reader.releaseLock?.();
-      if (!rawDataReceived) {
-        console.error("[Qwen] No raw data received from SSE stream!");
-      }
       await deleteChatSession(account.token, chatId);
     }
   }
@@ -454,7 +525,8 @@ export class QwenProvider extends BaseProvider {
       : this.getDefaultAccount();
     if (!account) throw new Error("未登录 Qwen，请先运行 chat2cli login");
 
-    const model = options.model || "qwen-max";
+    const realModels = await this._fetchModels(account.token);
+    const model = options.model || realModels[0]?.id;
     const prompt = options.prompt || buildPromptFromMessages(messages);
 
     const chatId = await createChatSession(account.token, model);

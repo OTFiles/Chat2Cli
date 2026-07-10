@@ -150,11 +150,30 @@ function firstNonEmpty(...values) {
   return "";
 }
 
+/** 提取 extra.summary_title / extra.summary_thought 的 content 数组文本 */
+function extractExtraSummaryText(extra) {
+  if (!extra) return "";
+  const parts = [];
+  for (const key of ["summary_title", "summary_thought"]) {
+    const val = extra[key];
+    if (!val) continue;
+    const items = val?.content;
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        if (typeof item === "string" && item.trim()) parts.push(item.trim());
+      }
+    } else if (typeof items === "string" && items.trim()) {
+      parts.push(items.trim());
+    }
+  }
+  return parts.join("\n");
+}
+
 /**
  * 将 Qwen SSE 数据行解析为 { kind, text } delta。
  * 参照 qwen2API upstream/sse_consumer.go ParseQwenEvent()
  * - 支持 delta 中多种 reasoning 字段（reasoning_content / reasoning / reasoning_text / thinking / thoughts）
- * - 支持 extra 子对象中的 reasoning 字段
+ * - 支持 extra 子对象中的 reasoning 字段 + summary_title / summary_thought
  * - 支持顶层 fallback（content / answer / text / delta / reasoning_content / reasoning / thinking）
  */
 export function createQwenDeltaDecoder() {
@@ -162,6 +181,10 @@ export function createQwenDeltaDecoder() {
     consume(jsonStr) {
       try {
         const obj = JSON.parse(jsonStr);
+
+        // 跳过 response.created 等元数据事件
+        if (obj["response.created"]) return null;
+
         const choice = obj?.choices?.[0];
         if (choice?.delta) {
           const delta = choice.delta;
@@ -174,7 +197,13 @@ export function createQwenDeltaDecoder() {
             extra?.reasoning_content, extra?.reasoning,
             extra?.reasoning_text, extra?.thinking, extra?.thoughts
           );
-          if (reasoning) return { kind: "thinking", text: reasoning };
+          // thinking_summary 阶段：extra.summary_title / extra.summary_thought
+          const summaryThinking = extractExtraSummaryText(extra);
+
+          if (reasoning || summaryThinking) {
+            const combined = [reasoning, summaryThinking].filter(Boolean).join("\n");
+            if (combined) return { kind: "thinking", text: combined };
+          }
 
           const content = firstNonEmpty(delta.content);
           if (content) return { kind: "response", text: content };
@@ -182,7 +211,7 @@ export function createQwenDeltaDecoder() {
           return null;
         }
 
-        // 顶层 fallback：某些模型直接在根级别返回字段
+        // 顶层 fallback
         const topReasoning = firstNonEmpty(obj.reasoning_content, obj.reasoning, obj.thinking);
         if (topReasoning) return { kind: "thinking", text: topReasoning };
         const topContent = firstNonEmpty(obj.content, obj.answer, obj.text, obj.delta);

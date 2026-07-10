@@ -44,6 +44,13 @@ export class OpenAIProvider extends BaseProvider {
     return !!(info && info.apiKey);
   }
 
+  removeAccount() {
+    updateStore((state) => ({
+      ...state,
+      providers: { ...state.providers, openai: {} }
+    }));
+  }
+
   async *chat(messages, options = {}) {
     const account = this.getAccountInfo();
     if (!account?.apiKey) throw new Error("未配置 OpenAI API Key，请先运行 chat2cli login");

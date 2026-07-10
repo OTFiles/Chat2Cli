@@ -49,6 +49,7 @@ function normalizeState(value) {
   if (!value || typeof value !== "object") return defaultState();
   return {
     config: {
+      ...value.config,
       defaultProvider: value.config?.defaultProvider || "deepseek",
       defaultModel: value.config?.defaultModel || "deepseek-chat-fast"
     },

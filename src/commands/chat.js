@@ -17,9 +17,15 @@ function resolveProvider() {
 /** 获取当前 provider 的默认模型 */
 function resolveModel(provider, modelOverride) {
   if (modelOverride) return modelOverride;
+  const validIds = provider.getModels().map(m => m.id);
+  // 1. per-provider 模型偏好（/model 命令持久化）
   const providerModel = getModelForProvider(provider.name);
-  if (providerModel) return providerModel;
-  return getConfig().defaultModel || provider.getModels()[0]?.id || "qwen-max";
+  if (providerModel && validIds.includes(providerModel)) return providerModel;
+  // 2. 全局默认模型（仅当对当前 provider 有效时）
+  const defaultModel = getConfig().defaultModel;
+  if (defaultModel && validIds.includes(defaultModel)) return defaultModel;
+  // 3. provider 的第一个模型
+  return validIds[0] || "gpt-3.5-turbo";
 }
 
 function buildConversationTitle(messages) {
