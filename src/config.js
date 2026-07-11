@@ -54,6 +54,21 @@ export function getCurrentModel() {
   return getConfig().defaultModel;
 }
 
+// ── Agent 配置 ──
+
+export function getAgentConfig() {
+  const config = getConfig();
+  return config.agent || {};
+}
+
+export function setAgentConfigKey(key, value) {
+  return updateStore((state) => {
+    const agent = { ...(state.config.agent || {}) };
+    agent[key] = value;
+    return { ...state, config: { ...state.config, agent } };
+  });
+}
+
 // ── 聊天参数配置 ──
 
 /** 获取聊天选项（thinking_enabled, enable_search 等），支持 per-provider fallback */

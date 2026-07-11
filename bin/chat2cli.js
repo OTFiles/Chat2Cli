@@ -18,6 +18,7 @@ import { runHistory } from "../src/commands/history.js";
 import { runConfig } from "../src/commands/config.js";
 import { runApiKey } from "../src/commands/apikey.js";
 import { runServe } from "../src/commands/serve.js";
+import { runAgent } from "../src/commands/agent.js";
 
 const program = new Command();
 
@@ -185,6 +186,53 @@ ${chalk.dim("使用示例:")}
   .action(async (opts) => {
     try {
       await runServe({ port: opts.port });
+    } catch (err) {
+      process.stderr.write(chalk.red("错误: " + err.message + "\n"));
+      process.exit(1);
+    }
+  });
+
+program
+  .command("agent")
+  .description("AI Agent 模式 — 自动规划并执行任务（支持工具调用）")
+  .option("--new [name]", "强制新建复合对话")
+  .option("--list", "列出所有复合对话")
+  .option("--continue <id>", "继续指定复合对话")
+  .option("--delete <id>", "删除指定复合对话")
+  .option("--dir <path>", "指定工作目录")
+  .addHelpText("after", `
+${chalk.dim("说明:")}
+  Agent 模式使用主 AI + 辅助 AI 双账号协作，能自动使用工具完成编程任务。
+  支持的工具有: shell 命令执行、文件读写、文件搜索、任务清单管理。
+
+${chalk.dim("用法:")}
+  ${chalk.cyan("chat2cli agent")}           新建或继续复合对话
+  ${chalk.cyan("chat2cli agent --new")}     强制新建复合对话
+  ${chalk.cyan("chat2cli agent --list")}    列出所有复合对话
+  ${chalk.cyan("chat2cli agent --continue <id>")}  继续指定对话
+  ${chalk.cyan("chat2cli agent --delete <id>")}    删除指定对话
+
+${chalk.dim("TUI 内置命令:")}
+  ${chalk.cyan("/help")}       显示帮助
+  ${chalk.cyan("/todo")}       查看任务清单
+  ${chalk.cyan("/context")}    查看当前上下文
+  ${chalk.cyan("/aux <任务>")}  委托任务给辅助 AI
+  ${chalk.cyan("/clear")}      清屏
+  ${chalk.cyan("/exit")}       退出
+
+${chalk.dim("快捷键:")}
+  ${chalk.cyan("Ctrl+C")}   中断当前 agent 循环
+  ${chalk.cyan("↑↓")}       历史输入导航
+  `)
+  .action(async (opts) => {
+    try {
+      await runAgent({
+        new: opts.new,
+        list: opts.list,
+        continue: opts.continue,
+        delete: opts.delete,
+        dir: opts.dir
+      });
     } catch (err) {
       process.stderr.write(chalk.red("错误: " + err.message + "\n"));
       process.exit(1);
