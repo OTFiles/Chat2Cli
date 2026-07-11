@@ -55,18 +55,36 @@ function getBearerToken(req) {
   return v.startsWith("Bearer ") ? v.slice(7) : "";
 }
 
-async function handleModels(res) {
-  const providers = listProviders();
-  const models = [];
-  for (const provider of providers) {
+async function handleModels(req, res) {
+  const token = getBearerToken(req);
+
+  if (token) {
+    // 有 API Key：仅返回该 Key 绑定的 provider 的模型
+    const resolved = resolveApiKey(token);
+    if (!resolved) return sendError(res, 401, "无效的 API Key，请运行 chat2cli apikey create 创建");
+
+    const { provider } = resolved;
+    const models = [];
     if (typeof provider.getModels === "function") {
-      const ownedBy = provider.name;
       for (const m of provider.getModels()) {
-        models.push({ id: m.id, object: "model", created: 0, owned_by: ownedBy });
+        models.push({ id: m.id, object: "model", created: 0, owned_by: provider.name });
       }
     }
+    sendJson(res, 200, { object: "list", data: models });
+  } else {
+    // 无 API Key：仅返回已认证服务商的模型
+    const providers = listProviders();
+    const models = [];
+    for (const provider of providers) {
+      if (!provider.isAuthenticated()) continue;
+      if (typeof provider.getModels === "function") {
+        for (const m of provider.getModels()) {
+          models.push({ id: m.id, object: "model", created: 0, owned_by: provider.name });
+        }
+      }
+    }
+    sendJson(res, 200, { object: "list", data: models });
   }
-  sendJson(res, 200, { object: "list", data: models });
 }
 
 async function handleChatCompletions(req, res) {
@@ -91,6 +109,13 @@ async function handleChatCompletions(req, res) {
   }
 
   const model = body.model || getConfig().defaultModel;
+
+  // 校验 model 是否属于当前 API Key 绑定的 provider
+  const providerModels = provider.getModels();
+  if (!providerModels.some((m) => m.id === model)) {
+    return sendError(res, 400, `模型 "${model}" 不属于 ${provider.label} 服务商`);
+  }
+
   const streaming = body.stream !== false;
 
   // 检查是否需要工具调用支持
@@ -162,7 +187,7 @@ export function createApiServer() {
         return;
       }
       if (url.pathname === "/v1/models" && req.method === "GET") {
-        await handleModels(res);
+        await handleModels(req, res);
         return;
       }
       if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
