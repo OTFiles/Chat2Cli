@@ -1,0 +1,8 @@
+{
+  "context": {
+    "includeDirectories": [
+      "/data/data/com.termux/files/home/object/chat2cli/awesome-ai-system-prompts",
+      "/data/data/com.termux/files/home/object/chat2cli/system-prompts-and-models-of-ai-tools-chinese"
+    ]
+  }
+}
