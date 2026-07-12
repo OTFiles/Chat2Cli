@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import { runAgentLoop, runAuxCall } from "./agent-loop.js";
 import {
-  printFooter, printUserMsg, BOX, termWidth
+  printFooter, printUserMsg, printThinkingLabel, BOX, termWidth
 } from "../utils/format.js";
 import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
@@ -282,6 +282,7 @@ export async function agentTui(context) {
       printUserMsg(input);
     }
     resetMarkdownRenderer();
+    resetThinkingState();
 
     abortController = new AbortController();
 
@@ -389,20 +390,58 @@ export async function agentTui(context) {
   }
 }
 
+// ── Thinking 状态管理 ──
+
+let thinkingBuf = "";
+let thinkingActive = false;
+
+function resetThinkingState() {
+  thinkingBuf = "";
+  thinkingActive = false;
+}
+
+/** 重绘最后 N 行 thinking 内容（原地刷新） */
+function redrawThinkingTail(maxLines = 4) {
+  if (!thinkingBuf) return;
+  const lines = thinkingBuf.split("\n");
+  const tail = lines.slice(-maxLines);
+  // 上移以覆盖之前绘制的行
+  process.stdout.write(`\x1b[${Math.max(0, tail.length)}A`);
+  process.stdout.write("\x1b[J"); // 清到屏底
+  for (const l of tail) {
+    process.stdout.write(chalk.gray("   " + l) + "\n");
+  }
+  // 光标回到末尾行下方
+}
+
+/** 清除 thinking 显示 */
+function clearThinkingDisplay() {
+  if (!thinkingActive) return;
+  // 清除最后绘制的 thinking 行
+  const tailCount = Math.min(4, thinkingBuf.split("\n").length);
+  process.stdout.write(`\x1b[${tailCount}A\x1b[J`);
+  thinkingActive = false;
+  thinkingBuf = "";
+}
+
 // ── 渲染 Agent 事件 ──
 
 function renderAgentEvent(event, mainProvider, auxProvider) {
   switch (event.type) {
     case "thinking": {
-      const text = (event.text || "").replace(/\n/g, "\n   ");
-      process.stdout.write(chalk.gray("   " + text));
+      if (!thinkingActive) {
+        printThinkingLabel();
+        thinkingActive = true;
+      }
+      thinkingBuf += event.text;
+      redrawThinkingTail(4);
       break;
     }
 
     case "response": {
       if (event.source === "aux") return;
-      const text = (event.text || "").replace(/\n/g, "\n   ");
-      process.stdout.write("   " + chalk.white(text));
+      clearThinkingDisplay();
+      renderMarkdown(event.text, true);
       break;
     }
 
@@ -433,9 +472,11 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
 
     case "done": {
       if (event.source === "aux") return;
+      clearThinkingDisplay();
       if (event.text?.trim()) {
-        process.stdout.write("   " + event.text.replace(/\n/g, "\n   ") + "\n\n");
+        renderMarkdown(event.text, true);
       }
+      process.stdout.write("\n");
       break;
     }
   }
