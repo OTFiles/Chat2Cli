@@ -1,5 +1,6 @@
 import { createBaseHeaders, DEEPSEEK_BASE_URL, refreshAccountToken } from "./auth.js";
 import { solvePowChallenge } from "./pow-solver.js";
+import { createSseParser } from "../../utils/sse.js";
 
 const POW_PROTECTED_PATHS = new Set(["/api/v0/chat/completion", "/api/v0/file/upload_file"]);
 
@@ -99,6 +100,87 @@ export async function createChatSession(account) {
 export async function deleteChatSession(account, chatSessionId) {
   const { response } = await proxyDeepseekRequest({ account, method: "POST", path: "/api/v0/chat_session/delete", body: Buffer.from(JSON.stringify({ chat_session_id: chatSessionId })), headers: JSON_HEADERS });
   await readPayload(response);
+}
+
+export async function deleteAllChatSessions(account) {
+  const { response } = await proxyDeepseekRequest({ account, method: "POST", path: "/api/v0/chat_session/delete_all" });
+  await readPayload(response);
+}
+
+// --- 搜索 ---
+
+/** 将 parts 数组拼接为纯文本 */
+function partsToText(parts) {
+  if (!Array.isArray(parts)) return "";
+  return parts.map((p) => p?.text ?? "").join("");
+}
+
+/** 将 parts 数组转为带高亮标记的片段列表 */
+function partsToSnippets(parts, maxLen = 120) {
+  if (!Array.isArray(parts)) return [{ text: "", highlights: [] }];
+  const result = [];
+  let total = 0;
+  for (const p of parts) {
+    const text = p?.text ?? "";
+    if (!text) continue;
+    const remaining = maxLen - total;
+    if (remaining <= 0) break;
+    const truncated = text.length > remaining ? text.slice(0, remaining) + "…" : text;
+    result.push({ text: truncated, highlight: Boolean(p?.highlight) });
+    total += truncated.length;
+    if (text.length > remaining) break;
+  }
+  if (!result.length) result.push({ text: "", highlight: false });
+  return result;
+}
+
+/**
+ * 搜索 DeepSeek 会话索引
+ * POST /api/v0/index/query 返回 SSE (text/event-stream)
+ * 返回搜索结果数组
+ */
+export async function searchIndexSessions(account, query) {
+  const { response } = await proxyDeepseekRequest({
+    account,
+    method: "POST",
+    path: "/api/v0/index/query",
+    body: Buffer.from(JSON.stringify({ query, before_seq_id: null })),
+    headers: JSON_HEADERS
+  });
+
+  const results = [];
+  const decoder = new TextDecoder();
+
+  const parser = createSseParser(({ event, data }) => {
+    if (!data) return;
+    if (event !== "item") return;
+    try {
+      const item = JSON.parse(data);
+      const title = item.chat_session_title ? partsToText(item.chat_session_title.parts) : "";
+      const contentSnippet = item.content ? partsToText(item.content.parts) : "";
+      results.push({
+        sessionId: item.chat_session_id || "",
+        title: title || "未命名",
+        titleSnippets: item.chat_session_title ? partsToSnippets(item.chat_session_title.parts, 80) : [{ text: title || "未命名", highlight: false }],
+        contentSnippet: contentSnippet.slice(0, 200),
+        contentSnippets: item.content ? partsToSnippets(item.content.parts, 150) : [{ text: contentSnippet.slice(0, 150), highlight: false }],
+        messageRole: item.message_role || "",
+        messageId: item.message_id,
+        isThink: Boolean(item.is_think),
+        timestamp: item.timestamp,
+        seqId: item.seq_id
+      });
+    } catch { /* skip malformed items */ }
+  });
+
+  if (!response.body) return results;
+
+  for await (const chunk of response.body) {
+    parser.push(decoder.decode(chunk, { stream: true }));
+  }
+  parser.flush();
+
+  return results;
 }
 
 /**

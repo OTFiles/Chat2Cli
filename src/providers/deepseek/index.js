@@ -1,7 +1,7 @@
 import { BaseProvider } from "../base.js";
 import { loginToDeepseek } from "./auth.js";
 import { startDeepseekCompletion, streamRawDeltas, streamDeltasWithMessageId } from "./chat.js";
-import { createChatSession, deleteChatSession, fetchSessionPage, fetchSessionMessages } from "./proxy.js";
+import { createChatSession, deleteChatSession, deleteAllChatSessions, searchIndexSessions, fetchSessionPage, fetchSessionMessages } from "./proxy.js";
 import { createId } from "../../utils/id.js";
 import { getStore, updateStore } from "../../storage/store.js";
 import { buildPromptFromMessages, buildChatCompletionBody } from "../../bridge.js";
@@ -223,5 +223,17 @@ export class DeepSeekProvider extends BaseProvider {
     const account = this.getAccountInfo(accountId);
     if (!account) throw new Error("账号未找到");
     return deleteChatSession(account, sessionId);
+  }
+
+  async deleteAllSessions(accountId) {
+    const account = this.getAccountInfo(accountId);
+    if (!account) throw new Error("账号未找到");
+    return deleteAllChatSessions(account);
+  }
+
+  async searchSessions(accountId, query) {
+    const account = this.getAccountInfo(accountId);
+    if (!account) throw new Error("账号未找到");
+    return searchIndexSessions(account, query);
   }
 }

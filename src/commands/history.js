@@ -34,6 +34,8 @@ export async function runHistory(subCommand, opts = {}, ...args) {
     case "ds-delete": await deleteDsSession(args[0], limit); break;
     case "batch-local": await batchDeleteLocal(); break;
     case "batch-ds": await batchDeleteDs(limit); break;
+    case "ds-clear": await clearDsSessions(); break;
+    case "ds-search": await searchDsSessions(args.join(" "), limit); break;
     default: await listAll(); break;
   }
 }
@@ -494,5 +496,172 @@ async function batchDeleteDs(limit = 0) {
     printWarn(`删除完成: ${ok} 成功, ${fail} 失败`);
   } else {
     printSuccess(`已删除 ${ok} 条云端会话。`);
+  }
+}
+
+async function clearDsSessions() {
+  const provider = getProvider("deepseek");
+  if (!provider?.isAuthenticated()) { printError("未登录 DeepSeek"); return; }
+
+  const account = await selectDsAccount(provider);
+  if (!account) return;
+
+  // 先获取总数，告知用户
+  const spinner = ora("正在获取云端会话数量...").start();
+  let total = 0;
+  try {
+    const result = await provider.fetchSessions(account.id, 0);
+    total = result.total || 0;
+    spinner.succeed(`该账号共有 ${total} 条云端会话`);
+  } catch (err) {
+    spinner.fail(err.message);
+    return;
+  }
+
+  if (total === 0) { printInfo("没有可删除的云端会话。"); return; }
+
+  // 二次确认（需输入 YES）
+  const { confirm } = await inquirer.prompt([{
+    type: "input", name: "confirm",
+    message: `确定删除全部 ${chalk.red(total)} 条云端会话吗？输入 ${chalk.bold("YES")} 确认: `,
+    validate: (val) => val === "YES" || `请输入 ${chalk.bold("YES")} 确认`
+  }]);
+  if (confirm !== "YES") { printInfo("已取消。"); return; }
+
+  const delSpinner = ora("正在删除所有云端会话...").start();
+  try {
+    await provider.deleteAllSessions(account.id);
+    delSpinner.succeed(`已删除全部 ${total} 条云端会话`);
+  } catch (err) {
+    delSpinner.fail(err.message);
+  }
+}
+
+// --- DS 会话搜索 ---
+
+/** 将 snippets 渲染为带高亮的终端文本 */
+function renderSnippets(snippets, maxLen = 80) {
+  if (!Array.isArray(snippets)) return "";
+  let result = "";
+  for (const s of snippets) {
+    if (s.highlight) {
+      result += chalk.bgYellow.black(s.text);
+    } else {
+      result += s.text;
+    }
+    if (result.length >= maxLen) break;
+  }
+  return result.length > maxLen ? result.slice(0, maxLen) + "…" : result;
+}
+
+async function searchDsSessions(query, limit = 0) {
+  if (!query) { printError("请提供搜索关键词。示例: chat2cli history ds-search Termux"); return; }
+
+  const provider = getProvider("deepseek");
+  if (!provider?.isAuthenticated()) { printError("未登录 DeepSeek"); return; }
+
+  const account = await selectDsAccount(provider);
+  if (!account) return;
+
+  const spinner = ora(`正在搜索: ${chalk.bold(query)}...`).start();
+  let results = [];
+  try {
+    results = await provider.searchSessions(account.id, query);
+    spinner.succeed(`找到 ${results.length} 条结果`);
+  } catch (err) {
+    spinner.fail(err.message);
+    return;
+  }
+
+  if (!results.length) {
+    printInfo(`未找到与 "${chalk.bold(query)}" 相关的会话。`);
+    return;
+  }
+
+  // 按 session 去重，每个 session 只保留第一条匹配
+  const seenSessions = new Set();
+  const unique = [];
+  for (const r of results) {
+    if (seenSessions.has(r.sessionId)) continue;
+    seenSessions.add(r.sessionId);
+    unique.push(r);
+    if (limit > 0 && unique.length >= limit) break;
+  }
+
+  const display = limit > 0 ? unique.slice(0, limit) : unique;
+
+  process.stdout.write("\n");
+  for (let i = 0; i < display.length; i++) {
+    const r = display[i];
+    const idx = chalk.dim(`${i + 1}.`);
+    const roleIcon = r.messageRole === "USER" ? chalk.cyan("👤") : chalk.green("🤖");
+    const thinkTag = r.isThink ? chalk.gray(" [思考]") : "";
+
+    process.stdout.write(`${idx} ${roleIcon} ${renderSnippets(r.titleSnippets, 60)}${thinkTag}\n`);
+    process.stdout.write(`   ${chalk.gray(renderSnippets(r.contentSnippets, 100))}\n`);
+    process.stdout.write(`   ${chalk.dim(`会话: ${r.sessionId.slice(0, 12)}…  时间: ${formatDate(typeof r.timestamp === "number" ? new Date(r.timestamp * 1000).toISOString() : r.timestamp || "")}`)}\n\n`);
+  }
+
+  // 交互式选择继续对话
+  if (display.length) {
+    process.stdout.write(chalk.gray("输入序号继续该会话，或按 Enter 退出\n"));
+    const { choice } = await inquirer.prompt([{
+      type: "input", name: "choice",
+      message: "选择:",
+      validate: (val) => {
+        if (!val.trim()) return true;
+        const n = Number(val);
+        if (isNaN(n) || n < 1 || n > display.length) return `请输入 1-${display.length}`;
+        return true;
+      }
+    }]);
+    const idx = Number(choice);
+    if (idx >= 1 && idx <= display.length) {
+      const selected = display[idx - 1];
+      await continueDsSessionById(provider, account, selected.sessionId, limit);
+    }
+  }
+}
+
+/** 直接通过 sessionId 继续会话（跳过前缀匹配查找） */
+async function continueDsSessionById(provider, account, sessionId, limit = 0) {
+  const spinner = ora("正在获取会话消息...").start();
+  let dsMessages, currentMessageId;
+  try {
+    const result = await provider.fetchMessages(account.id, sessionId);
+    dsMessages = result.messages;
+    currentMessageId = result.currentMessageId;
+    spinner.succeed("已加载");
+  } catch (err) {
+    spinner.fail(err.message);
+    return;
+  }
+
+  if (!dsMessages.length) { printWarn("该会话无消息记录"); return; }
+
+  const messages = [...dsMessages];
+  const currentModel = "deepseek-chat-fast";
+
+  printChatHeader(provider.label, currentModel, sessionId.slice(0, 8));
+  echoMessages(messages, true);
+
+  await chatLoop(provider, messages, currentModel, account.id, sessionId, currentMessageId, true);
+
+  // 保存到本地
+  if (messages.length > dsMessages.length) {
+    import("../utils/id.js").then(({ createId }) => {
+      const convId = createId();
+      updateStore((state) => ({
+        ...state,
+        conversations: [{
+          id: convId, provider: provider.name, model: currentModel,
+          title: messages.find((m) => m.role === "user")?.content?.slice(0, 50) || "未命名",
+          messages: [...messages],
+          accountId: account.id || "", dsSessionId: sessionId,
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+        }, ...state.conversations]
+      }));
+      process.stdout.write(chalk.green("✓ ") + `对话已保存\n`);
+    });
   }
 }

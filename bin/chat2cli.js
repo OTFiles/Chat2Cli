@@ -92,6 +92,8 @@ ${chalk.dim("DeepSeek 云端会话:")}
   ${chalk.cyan("history ds")}             获取 DS 账号的云端会话列表
   ${chalk.cyan("history ds-continue <id>")} 继续云端会话
   ${chalk.cyan("history ds-delete <id>")}   删除云端会话
+  ${chalk.cyan("history ds-clear")}        删除全部云端会话
+  ${chalk.cyan("history ds-search <关键词>")}  搜索云端会话内容
 
 ${chalk.dim("批量操作:")}
   ${chalk.cyan("history batch-local")}     多选删除本地对话
