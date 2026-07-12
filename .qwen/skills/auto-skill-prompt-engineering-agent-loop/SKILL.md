@@ -1,8 +1,8 @@
 ---
 name: prompt-engineering-agent-loop
-description: Build agent loops with tool calling via prompt engineering (XML-injected tool definitions) for LLM providers that lack native function-calling APIs. Includes the iteration pattern — send, parse tool calls, execute, append results, loop — plus composite conversation storage and dual-AI delegation.
+description: Build agent loops with tool calling via prompt engineering (XML-injected tool definitions) for LLM providers that lack native function-calling APIs. Includes the iteration pattern, composite conversation storage, dual-AI delegation, boxed CLI header with ASCII logo, and explicit tool-result rendering in TUI.
 source: auto-skill
-extracted_at: '2026-07-11T03:17:12.694Z'
+extracted_at: '2026-07-11T23:36:20.974Z'
 ---
 
 # Prompt-Engineering Agent Loop
@@ -106,3 +106,123 @@ When building a terminal UI for the agent loop:
 - Show tool execution as separate events (`tool_start`, `tool_result`)
 - Support Ctrl+C to abort the current loop iteration without exiting the TUI
 - After interruption, enter "manual guidance mode" — user can type new instructions before resuming
+
+## Boxed Header with ASCII Logo
+
+When the agent TUI needs a branded header matching the existing chat mode, build a box that scales to terminal width and houses the project's ASCII logo plus agent-specific info rows.
+
+**Pattern** (from `src/agent/tui.js` `printAgentHeader`):
+
+```js
+function printAgentHeader({ mainLabel, auxLabel, mainModel, auxModel, projectName, workingDir }) {
+  const W = termWidth();       // process.stdout.columns || 80
+  const inner = W - 2;         // subtract border chars ╭...╮
+
+  // Reuse the project's existing ASCII art logo (6 lines)
+  const logo = [ /* 6 lines of ASCII art */ ];
+
+  // Info rows replace the chat header's single model/session line
+  const infoRows = [
+    `  主AI: ${bold(mainLabel)}  ${cyan(mainModel)}`,
+    `  辅助: ${bold(auxLabel)}  ${cyan(auxModel)}`,
+    `  项目: ${bold(projectName)}  ${dim(workingDir)}`
+  ];
+
+  // Draw border:  BOX.tl + BOX.h.repeat(inner) + BOX.tr
+  // Logo lines:  BOX.v + padL + line + padR + BOX.v  (centered by visualWidth)
+  // Gap line:    BOX.v + spaces + BOX.v
+  // Info rows:   BOX.v + "  " + row + padR + BOX.v  (left-aligned, 2-space indent)
+  // Bottom:      BOX.bl + BOX.h.repeat(inner) + BOX.br
+}
+```
+
+**Key points:**
+- Import `BOX` and `termWidth` from the project's `utils/format.js`
+- `visualWidth(s)` must strip ANSI escape codes before measuring; CJK/emoji = 2 cols, ASCII = 1 col
+- `BOX` provides corner and edge characters (╭╮╰╯─│)
+- The logo is statically defined (does not change per session) so hardcode it
+- Info rows should include both the AI provider name AND the selected model so the user can see the full configuration at a glance
+
+## Tool Result Rendering in TUI
+
+Every external tool call must leave a visible trace in the terminal UI. Use distinct renderers per tool type.
+
+### Shell
+
+```
+   $ ls -la /tmp                              ← gray, dim, first 2 lines of command
+    ✓ SHELL                                   ← green ✓ or red ✗ in bold
+   drwx------  2 root root 4096 ...           ← output last 5 lines
+   -rw-r--r--  1 root root   42 ...
+```
+
+**Rules:**
+- Command truncated to first 2 lines, max 200 chars; append `…` if truncated
+- Output taken from `stderr || stdout`, last 5 lines, max 500 chars
+- If `result.error` exists and stderr is empty, append it in red
+- Icon: green ` ✓ ` on success, red ` ✗ ` on failure, always followed by bold `SHELL`
+
+### File Read / File Write
+
+```
+   ✓ FILE-READ  /path/to/file  (行 0-42)      ← path + line range in gray
+   │ line 1                                    ← content lines, gray │ prefix
+   │ line 2
+   │ … (共 120 行，已截断)                      ← truncation notice
+```
+
+**Rules:**
+- Cap at **50 lines**; show truncation notice with total count
+- Content lines prefixed with gray `   │ `
+- Empty files shown as `(空文件)`
+
+### File Search
+
+```
+   ✓ SEARCH  content: pattern  (15 个结果)
+   │ src/foo.js:42  matching text...
+   │ src/bar.js:7   matching text...
+   │ … 还有 5 个
+```
+
+**Rules:**
+- Cap at **10 results**; show remainder count
+- Content matches show `file:line` + first 120 chars of matching text
+- Filename matches show relative path only
+
+### Todo
+
+```
+   ✓ TODO  任务清单已更新 (3 项)
+     ○ pending task
+     ▶ in-progress task        ← icons: ✓ green / ▶ yellow / ○ gray
+     ✓ completed task
+```
+
+**Rules:**
+- Always show the full task list (no truncation — task lists are small)
+- `list` action: print as `TODO:` header followed by items
+- `update` action: print success line followed by the new items
+
+## Per-Provider Model Selection
+
+When the agent uses multiple providers, each AI needs its own model selection. Store them separately rather than sharing one model field.
+
+**Pattern** (from `src/commands/agent.js`):
+
+```js
+// After selecting main account:
+const mainModel = await selectModel(mainProvider, "主AI", composite.mainModel || null);
+
+// After selecting aux account:
+const auxModel = await selectModel(auxProvider, "辅助AI", composite.auxModel || null);
+
+// Persist in composite
+setModels(composite, mainModel, auxModel);
+```
+
+**`selectModel`** lists `provider.getModels()` via inquirer. If only 1 model exists, auto-select it. If continuing an existing composite, restore from `composite.mainModel`/`composite.auxModel`.
+
+**Storage:** `composite.mainModel` and `composite.auxModel` (replacing a single `composite.model`). Backward-compatible — old composites with only `model` get the interactive prompt on next use.
+
+**Propagation:** Pass `mainModel` and `auxModel` through the TUI context to `agent-loop.js`, which passes them as `model:` in `provider.startCompletion()` calls.

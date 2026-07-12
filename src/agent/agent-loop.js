@@ -1,8 +1,62 @@
-import { parseToolCallsFromText, buildPromptFromMessages, consumeQwenStream, consumeRawStream } from "../../bridge.js";
-import { executeToolCall, TOOL_DEFINITIONS } from "../tools/registry.js";
-import { buildMainSystemPrompt } from "../prompts/main-system.js";
-import { buildAuxSystemPrompt } from "../prompts/aux-system.js";
-import { appendMessage, updateTaskList } from "../storage/composite.js";
+import { parseToolCallsFromText, buildPromptFromMessages, consumeQwenStream, consumeRawStream } from "../bridge.js";
+import { executeToolCall, TOOL_DEFINITIONS } from "./tools/registry.js";
+import { buildMainSystemPrompt } from "./prompts/main-system.js";
+import { buildAuxSystemPrompt } from "./prompts/aux-system.js";
+import { appendMessage, updateTaskList } from "./storage/composite.js";
+
+// ── 工具结果紧凑格式化 ──
+
+/** 将工具结果转为人类可读的紧凑文本，替代完整 JSON */
+function formatToolResultCompact(toolName, result) {
+  if (!result) return "";
+
+  switch (toolName) {
+    case "shell": {
+      const parts = [`命令: ${result.command || ""}`];
+      if (result.exitCode !== undefined) parts.push(`退出: ${result.exitCode}`);
+      if (result.stderr) parts.push(`stderr:\n${result.stderr.slice(-1000)}`);
+      else if (result.stdout) parts.push(`stdout:\n${result.stdout.slice(-3000)}`);
+      else if (result.error) parts.push(`错误: ${result.error}`);
+      return parts.join("\n");
+    }
+    case "file-read": {
+      if (!result.success) return `读取失败: ${result.error}`;
+      const content = (result.content || "").slice(0, 3000);
+      return `(行 ${result.offset || 0}-${(result.offset || 0) + (result.lines || 0)} / 共 ${result.totalLines || "?"} 行)\n${content}`;
+    }
+    case "file-write": {
+      return result.success
+        ? `已写入: ${result.path}\n${result.message || ""}`
+        : `写入失败: ${result.error}`;
+    }
+    case "file-search": {
+      if (result.error) return `搜索失败: ${result.error}`;
+      if (result.type === "filename") {
+        const files = (result.files || []).slice(0, 20).join("\n");
+        return `找到 ${result.count} 个文件:\n${files}`;
+      }
+      if (result.type === "content") {
+        const lines = (result.matches || []).slice(0, 20)
+          .map((m) => `${m.file}:${m.line}  ${m.text}`).join("\n");
+        return `找到 ${result.count} 处匹配:\n${lines}`;
+      }
+      return `找到 ${result.count || 0} 个结果`;
+    }
+    case "todo": {
+      if (result.action === "list") {
+        const items = (result.tasks || []).map((t) => `[${t.status}] ${t.content}`).join("\n");
+        return items || "(空)";
+      }
+      if (result.action === "update") {
+        const items = (result.tasks || []).map((t) => `[${t.status}] ${t.content}`).join("\n");
+        return `${result.message || "任务清单:"}\n${items}`;
+      }
+      return JSON.stringify(result).slice(0, 500);
+    }
+    default:
+      return JSON.stringify(result).slice(0, 1000);
+  }
+}
 
 // ── 消息构建 ──
 
@@ -19,8 +73,8 @@ function buildMessagesForMain(composite, workingDir) {
   const recentMessages = (composite.messages || []).slice(-40);
   for (const msg of recentMessages) {
     if (msg.role === "tool") {
-      const content = typeof msg.content === "string" ? msg.content.slice(0, 2000) : msg.content;
-      messages.push({ role: "tool", content: `工具 ${msg.toolName} 结果:\n${content}` });
+      const content = typeof msg.content === "string" ? msg.content.slice(0, 4000) : msg.content;
+      messages.push({ role: "tool", content });
     } else if (msg.role === "assistant") {
       messages.push({ role: "assistant", content: stripToolXml(msg.content) });
     } else if (msg.role === "user") {
@@ -110,7 +164,7 @@ export async function* runAgentLoop(userInput, context) {
     try {
       const resp = await mainProvider.startCompletion(messages, {
         prompt,
-        model: composite.model || undefined,
+        model: context.mainModel || undefined,
         accountId: composite.main.accountId
       });
 
@@ -170,7 +224,7 @@ export async function* runAgentLoop(userInput, context) {
             continue;
           }
 
-          const resultText = JSON.stringify(toolResult.result, null, 2);
+          const resultText = formatToolResultCompact(toolName, toolResult.result);
           appendMessage(composite, {
             role: "tool",
             content: resultText,
@@ -222,6 +276,7 @@ export async function* runAuxCall(userInput, context) {
   try {
     const resp = await auxProvider.startCompletion(messages, {
       prompt,
+      model: context.auxModel || undefined,
       accountId: composite.aux.accountId
     });
 

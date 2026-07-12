@@ -6,7 +6,8 @@ import { createId } from "../utils/id.js";
 import {
   printSuccess, printError, printInfo,
   printChatHeader, printFooter,
-  printUserMsg, printThinkingLabel, accountLabel
+  printUserMsg, printThinkingLabel, accountLabel,
+  termWidth
 } from "../utils/format.js";
 import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
@@ -489,12 +490,20 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       let escState = 0;
 
       function redrawPrompt() {
-        // 清除当前行从 prompt 开始的所有内容
+        // 计算当前输入占用的终端行数
+        const promptW = 4; // "   > " = 4 chars
+        let w = promptW;
+        for (const ch of input) w += charWidth(ch);
+        const tw = termWidth();
+        const lines = Math.max(1, Math.ceil(w / tw));
+        // 多行时先上移到首行
+        if (lines > 1) {
+          process.stdout.write(`\x1b[${lines - 1}A`);
+        }
         process.stdout.write("\r");
         process.stdout.write("   > ");
         process.stdout.write(input);
-        process.stdout.write("\x1b[0K"); // 清除到行尾
-        // 将光标移到正确位置（从 prompt "   > " 之后开始计算）
+        process.stdout.write("\x1b[0K");
         if (cursor < input.length) {
           const leftChars = Array.from(input.slice(cursor));
           const leftCols = leftChars.reduce((s, c) => s + charWidth(c), 0);
@@ -534,6 +543,8 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
 
       const onData = (chunk) => {
         const str = chunk.toString("utf-8");
+        const isPaste = str.length > 3;
+
         for (const char of str) {
           const code = char.codePointAt(0);
 
@@ -584,8 +595,9 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
           }
           if (code === 27) { escState = 1; continue; }
 
-          // Enter
+          // Enter: 粘贴时忽略（避免 \r 截断），正常输入时发送
           if (code === 13) {
+            if (isPaste) continue;
             process.stdout.write("\r\n");
             cleanup();
             const text = input.trim();
@@ -639,10 +651,12 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
             continue;
           }
 
-          // 可打印字符
-          if (code >= 32 || code === 10) {
+          // 可打印字符 + 换行（粘贴时 \n 替换为空格）
+          if (code >= 32 || (!isPaste && code === 10)) {
             insertChar(char);
-            redrawPrompt();
+            if (!isPaste) redrawPrompt();
+          } else if (code === 10 && isPaste) {
+            insertChar(" ");
           }
         }
       };

@@ -3,7 +3,7 @@ import chalk from "chalk";
 import { initProviders, getProvider } from "../providers/registry.js";
 import { getConfig, getAgentConfig, setAgentConfigKey } from "../config.js";
 import { printSuccess, printError, printInfo, printTable, formatDate, accountLabel } from "../utils/format.js";
-import { listComposites, createComposite, getComposite, deleteComposite } from "../agent/storage/composite.js";
+import { listComposites, createComposite, getComposite, deleteComposite, setModels } from "../agent/storage/composite.js";
 import { agentTui } from "../agent/tui.js";
 
 /**
@@ -57,6 +57,34 @@ async function selectProvider(role, preferredProvider) {
   return ans.selection;
 }
 
+/** 为指定 provider 选取模型 */
+async function selectModel(provider, role, preferredModel) {
+  const models = provider.getModels();
+  if (models.length === 0) return models[0]?.id || null;
+
+  // 如果有偏好的模型且在列表中，直接使用
+  if (preferredModel && models.some((m) => m.id === preferredModel)) {
+    return preferredModel;
+  }
+
+  if (models.length === 1) {
+    printInfo(`${role}模型: ${models[0].label || models[0].id}`);
+    return models[0].id;
+  }
+
+  const ans = await inquirer.prompt([{
+    type: "list",
+    name: "model",
+    message: `选择${role}模型 (${provider.label}):`,
+    choices: models.map((m) => ({
+      name: `${m.id}  ${chalk.gray(m.label || "")}`,
+      value: m.id
+    })),
+    pageSize: 15
+  }]);
+  return ans.model;
+}
+
 export async function runAgent(opts = {}) {
   initProviders();
 
@@ -88,6 +116,10 @@ export async function runAgent(opts = {}) {
     printError(`未找到辅助 AI provider: ${aux.providerName}`);
     return;
   }
+
+  // 选取模型（仅新建时选择，继续对话时从 composite 恢复）
+  let mainModel = null;
+  let auxModel = null;
 
   // ── 复合对话 ──
   let composite;
@@ -162,16 +194,22 @@ export async function runAgent(opts = {}) {
     composite.aux = { provider: aux.providerName, accountId: aux.accountId, sessionId: null };
   }
 
+  // 选取模型：已有 composite 则恢复，否则交互选择
+  mainModel = composite.mainModel || null;
+  auxModel = composite.auxModel || null;
+
+  if (!mainModel) {
+    mainModel = await selectModel(mainProvider, "主AI", null);
+  }
+  if (!auxModel) {
+    auxModel = await selectModel(auxProvider, "辅助AI", null);
+  }
+
+  setModels(composite, mainModel, auxModel);
+
   // 保存首次组装完毕的 composite
   const { saveComposite } = await import("../agent/storage/composite.js");
   saveComposite(composite);
-
-  // 设置模型（取 main provider 的默认模型）
-  if (!composite.model) {
-    const models = mainProvider.getModels();
-    composite.model = models[0]?.id || "deepseek-chat-fast";
-    saveComposite(composite);
-  }
 
   // 保存 agent 配置偏好（下次默认使用相同配置）
   const agentConfig = getAgentConfig();
@@ -185,6 +223,8 @@ export async function runAgent(opts = {}) {
     mainProvider,
     auxProvider,
     composite,
+    mainModel,
+    auxModel,
     workingDir: composite.workingDir || process.cwd()
   });
 }

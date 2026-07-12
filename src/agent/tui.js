@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import { runAgentLoop, runAuxCall } from "./agent-loop.js";
 import {
-  printFooter, printUserMsg, printThinkingLabel
+  printFooter, printUserMsg, BOX, termWidth
 } from "../utils/format.js";
 import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
@@ -11,13 +11,20 @@ import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
 /**
  * 启动 Agent TUI 循环
- * @param {object} context - { mainProvider, auxProvider, composite, workingDir }
+ * @param {object} context - { mainProvider, auxProvider, composite, workingDir, mainModel, auxModel }
  */
 export async function agentTui(context) {
-  const { composite, mainProvider, auxProvider, workingDir } = context;
+  const { composite, mainProvider, auxProvider, workingDir, mainModel, auxModel } = context;
 
-  // 显示头部
-  printAgentHeader(mainProvider, auxProvider, composite);
+  // 显示头部（含 CHAT2CLI logo）
+  printAgentHeader({
+    mainLabel: mainProvider.label,
+    auxLabel: auxProvider.label,
+    mainModel,
+    auxModel,
+    projectName: composite.name,
+    workingDir: workingDir || composite.workingDir
+  });
 
   // 设置 raw mode
   const wasRaw = process.stdin.isRaw;
@@ -38,10 +45,29 @@ export async function agentTui(context) {
     return (c.charCodeAt(0) > 127) ? 2 : 1;
   }
 
+  // 计算当前输入占用的终端行数
+  function inputLines() {
+    const promptW = 4; // "   ❯ " = 4 chars
+    let w = promptW;
+    for (const ch of currentInput) w += charWidth(ch);
+    const tw = termWidth();
+    return Math.max(1, Math.ceil(w / tw));
+  }
+
   function redrawPrompt() {
-    process.stdout.write("\r");
-    process.stdout.write("   ❯ ");
-    process.stdout.write(currentInput);
+    const lines = inputLines();
+    // 多行时先上移到首行
+    if (lines > 1) {
+      process.stdout.write(`\x1b[${lines - 1}A`);
+    }
+    process.stdout.write("\r   ❯ ");
+
+    // 超过 300 字符时显示摘要
+    if (currentInput.length > 300) {
+      process.stdout.write(chalk.gray(`[共 ${currentInput.length} 个字符]`));
+    } else {
+      process.stdout.write(currentInput);
+    }
     process.stdout.write("\x1b[0K");
     if (cursor < currentInput.length) {
       const left = Array.from(currentInput.slice(cursor));
@@ -51,12 +77,14 @@ export async function agentTui(context) {
   }
 
   function clearFooter() {
-    process.stdout.write("\x1b[2A\r\x1b[J");
+    const lines = inputLines();
+    process.stdout.write(`\x1b[${lines + 1}A\r\x1b[J`);
   }
 
   function drawFooter() {
+    const lines = inputLines();
     printFooter();
-    process.stdout.write("\x1b[3A\r");
+    process.stdout.write(`\x1b[${lines + 1}A\r`);
     process.stdout.write("   ❯ ");
   }
 
@@ -66,6 +94,10 @@ export async function agentTui(context) {
   // ── 按键处理 ──
   const onData = (buf) => {
     const str = buf.toString();
+
+    // 粘贴检测：单次 data 事件超过 3 个字符视为粘贴
+    const isPaste = str.length > 3;
+
     for (const ch of str) {
       const code = ch.charCodeAt(0);
 
@@ -96,19 +128,18 @@ export async function agentTui(context) {
         return;
       }
 
-      // Enter
+      // Enter: 粘贴时忽略（避免 \r 截断），正常输入时发送
       if (code === 13) {
+        if (isPaste) continue;
         clearFooter();
         const input = currentInput.trim();
-        if (input) {
-          inputHistory.push(currentInput);
-          histIdx = -1;
-        }
         currentInput = "";
         cursor = 0;
         process.stdout.write("\r\x1b[J\n");
 
         if (input) {
+          inputHistory.push(input);
+          histIdx = -1;
           handleInput(input);
         } else {
           // 空行：如果在中断模式，恢复
@@ -204,14 +235,32 @@ export async function agentTui(context) {
       // Tab: 忽略
       if (code === 9) continue;
 
-      // 可打印字符
+      // 换行符：粘贴时插入空格，非粘贴时忽略
+      if (code === 10) {
+        if (isPaste) {
+          const arr = Array.from(currentInput);
+          arr.splice(cursor, 0, " ");
+          currentInput = arr.join("");
+          cursor++;
+        }
+        if (!isPaste) redrawPrompt();
+        continue;
+      }
+
+      // 可打印字符（包含空格）
       if (code >= 32) {
         const arr = Array.from(currentInput);
         arr.splice(cursor, 0, ch);
         currentInput = arr.join("");
         cursor++;
-        redrawPrompt();
+        if (!isPaste) redrawPrompt();
+        continue;
       }
+    }
+
+    // 粘贴结束后一次性重绘
+    if (isPaste && currentInput.length > 0) {
+      redrawPrompt();
     }
   };
 
@@ -226,7 +275,12 @@ export async function agentTui(context) {
       return;
     }
 
-    printUserMsg(input);
+    // 显示用户消息（超长则截断显示）
+    if (input.length > 300) {
+      process.stdout.write("   " + chalk.green("❯") + " " + chalk.gray(`[共 ${input.length} 个字符]`) + "\n");
+    } else {
+      printUserMsg(input);
+    }
     resetMarkdownRenderer();
 
     abortController = new AbortController();
@@ -266,7 +320,14 @@ export async function agentTui(context) {
       case "/clear":
         printUserMsg(input);
         process.stdout.write("\x1b[2J\x1b[H");
-        printAgentHeader(mainProvider, auxProvider, composite);
+        printAgentHeader({
+          mainLabel: mainProvider.label,
+          auxLabel: auxProvider.label,
+          mainModel,
+          auxModel,
+          projectName: composite.name,
+          workingDir: workingDir || composite.workingDir
+        });
         break;
 
       case "/todo":
@@ -339,7 +400,7 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
     }
 
     case "response": {
-      if (event.source === "aux") return; // aux 事件单独处理
+      if (event.source === "aux") return;
       const text = (event.text || "").replace(/\n/g, "\n   ");
       process.stdout.write("   " + chalk.white(text));
       break;
@@ -352,13 +413,16 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
         process.stdout.write("\n   " + chalk.gray("(审批功能开发中，已跳过此操作)\n\n"));
         return;
       }
-      process.stdout.write("\n   " + chalk.cyan.bold(event.text) + "\n");
+      // shell 工具：显示命令
+      if (event.toolName === "shell") {
+        process.stdout.write("\n");
+        // 命令本身不在这里显示，等 tool_result 一起显示
+      }
       break;
     }
 
     case "tool_result": {
-      const summary = summarizeToolResult(event.toolName, event.toolResult);
-      process.stdout.write("   " + chalk.green("✓ ") + chalk.gray(summary) + "\n\n");
+      renderToolResult(event.toolName, event.toolResult);
       break;
     }
 
@@ -377,41 +441,242 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
   }
 }
 
-/** 工具结果摘要 */
-function summarizeToolResult(toolName, result) {
-  if (!result) return "";
+// ── 工具结果渲染 ──
+
+function renderToolResult(toolName, result) {
+  if (!result) { process.stdout.write("\n"); return; }
+
   switch (toolName) {
     case "shell":
-      return result.success
-        ? `命令执行成功 (${(result.stdout || "").length} 字符输出)`
-        : `命令执行失败: ${result.error || ""}`;
+      renderShellResult(result);
+      break;
+
     case "file-read":
-      return result.success
-        ? `读取 ${result.path} (行 ${result.offset}-${result.offset + result.lines})`
-        : result.error || "";
+      renderFileReadResult(result);
+      break;
+
     case "file-write":
-      return result.success
-        ? result.message || `文件已写入: ${result.path}`
-        : result.error || "";
+      renderFileWriteResult(result);
+      break;
+
     case "file-search":
-      return `找到 ${result.count} 个结果`;
+      renderFileSearchResult(result);
+      break;
+
     case "todo":
-      return result.message || `任务清单 ${result.tasks?.length || 0} 项`;
+      renderTodoResult(result);
+      break;
+
     default:
-      return JSON.stringify(result).slice(0, 100);
+      process.stdout.write("   " + chalk.green("✓") + " " + chalk.gray(JSON.stringify(result).slice(0, 120)) + "\n\n");
   }
 }
 
-// ── 头部和帮助 ──
+/** Shell 结果：命令(SHELL 同行) + 结果(后5行) */
+function renderShellResult(result) {
+  const success = result.success;
+  const cmd = result.command || "";
+  const stdout = result.stdout || "";
+  const stderr = result.stderr || "";
 
-function printAgentHeader(mainProvider, auxProvider, composite) {
-  process.stdout.write("\n" + chalk.bold.cyan("  ╭── Agent 模式 ──────────────────────") + "\n");
-  process.stdout.write("  │" + chalk.gray(`  主AI: ${mainProvider.label}`) + "\n");
-  process.stdout.write("  │" + chalk.gray(`  辅助: ${auxProvider.label}`) + "\n");
-  process.stdout.write("  │" + chalk.gray(`  项目: ${composite.name}`) + "\n");
-  process.stdout.write("  │" + chalk.gray(`  目录: ${composite.workingDir || process.cwd()}`) + "\n");
-  process.stdout.write("  ╰" + "─".repeat(38) + "\n\n");
+  // 截取命令显示（同行用）
+  const cmdShort = cmd.replace(/\n/g, " ").slice(0, 120);
+
+  // 结果取最后 5 行
+  const output = stderr || stdout || "(无输出)";
+  const outLines = output.split("\n");
+  const tailLines = outLines.slice(-5);
+  const tailDisplay = tailLines.join("\n").slice(0, 500);
+
+  // 状态图标 + SHELL + 命令（同一行）
+  const icon = success ? chalk.green(" ✓ ") : chalk.red(" ✗ ");
+  process.stdout.write("   " + icon + chalk.bold("SHELL") + "  " + chalk.gray.dim("$ ") + chalk.gray.dim(cmdShort));
+
+  // 结果另起一行
+  if (tailDisplay) {
+    process.stdout.write("\n   " + chalk.white(tailDisplay.replace(/\n/g, "\n   ")));
+  }
+  if (result.error && !stderr) {
+    process.stdout.write("\n   " + chalk.red(result.error.slice(0, 200)));
+  }
+  process.stdout.write("\n\n");
 }
+
+/** 文件读取：只显示路径+行范围，不展示内容 */
+function renderFileReadResult(result) {
+  if (!result.success) {
+    process.stdout.write("   " + chalk.red("✗") + " " + chalk.gray(result.error || "读取失败") + "\n\n");
+    return;
+  }
+
+  const path = result.path || "";
+  const offset = result.offset || 0;
+  const lines = result.lines || 0;
+  process.stdout.write("   " + chalk.green("✓") + chalk.bold(" FILE-READ") +
+    "  " + chalk.gray(path) +
+    "  " + chalk.dim(`(行 ${offset}-${offset + lines} / 共 ${result.totalLines || "?"} 行)`) + "\n\n");
+}
+
+/** 文件写入：显示内容，最多 50 行 */
+function renderFileWriteResult(result) {
+  if (!result.success) {
+    process.stdout.write("   " + chalk.red("✗") + " " + chalk.gray(result.error || "写入失败") + "\n\n");
+    return;
+  }
+
+  process.stdout.write("   " + chalk.green("✓") + chalk.bold(" FILE-WRITE") +
+    "  " + chalk.gray(result.message || result.path || "") + "\n\n");
+}
+
+/** 文件搜索：显示匹配列表，最多 10 条 */
+function renderFileSearchResult(result) {
+  if (!result.success && result.error) {
+    process.stdout.write("   " + chalk.red("✗") + " " + chalk.gray(result.error) + "\n\n");
+    return;
+  }
+
+  const count = result.count || 0;
+  process.stdout.write("   " + chalk.green("✓") + chalk.bold(" SEARCH") +
+    "  " + chalk.gray(`${result.type}: ${result.pattern}`) +
+    "  " + chalk.dim(`(${count} 个结果${result.truncated ? "，已截断" : ""})`) + "\n");
+
+  if (result.type === "filename" && result.files) {
+    for (const f of result.files.slice(0, 10)) {
+      process.stdout.write(chalk.gray("   │ ") + f + "\n");
+    }
+    if (result.files.length > 10) {
+      process.stdout.write(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.files.length - 10} 个`) + "\n");
+    }
+  }
+  if (result.type === "content" && result.matches) {
+    for (const m of result.matches.slice(0, 10)) {
+      process.stdout.write(chalk.gray(`   │ ${m.file}:${m.line}`) + "  " + m.text.slice(0, 120) + "\n");
+    }
+    if (result.matches.length > 10) {
+      process.stdout.write(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.matches.length - 10} 个`) + "\n");
+    }
+  }
+  process.stdout.write("\n");
+}
+
+/** 任务清单：显示完整列表 */
+function renderTodoResult(result) {
+  if (result.action === "list") {
+    const tasks = result.tasks || [];
+    if (!tasks.length) {
+      process.stdout.write("   " + chalk.gray("任务清单为空") + "\n\n");
+    } else {
+      process.stdout.write("   " + chalk.bold("TODO:") + "\n");
+      for (const t of tasks) {
+        const icon = t.status === "completed" ? chalk.green("✓") :
+                     t.status === "in_progress" ? chalk.yellow("▶") : chalk.gray("○");
+        process.stdout.write(`     ${icon} ${t.content}\n`);
+      }
+      process.stdout.write("\n");
+    }
+    return;
+  }
+
+  if (result.action === "update") {
+    process.stdout.write("   " + chalk.green("✓") + chalk.bold(" TODO") +
+      "  " + chalk.gray(result.message || "") + "\n");
+    const tasks = result.tasks || [];
+    for (const t of tasks) {
+      const icon = t.status === "completed" ? chalk.green("✓") :
+                   t.status === "in_progress" ? chalk.yellow("▶") : chalk.gray("○");
+      process.stdout.write(`     ${icon} ${t.content}\n`);
+    }
+    process.stdout.write("\n");
+    return;
+  }
+
+  process.stdout.write("\n");
+}
+
+// ═══════════════════════════════════════════════
+//  Agent Header — CHAT2CLI logo + agent 信息
+// ═══════════════════════════════════════════════
+
+function printAgentHeader({ mainLabel, auxLabel, mainModel, auxModel, projectName, workingDir }) {
+  const W = termWidth();
+  const inner = W - 2;
+
+  const logo = [
+    "   ██████╗██╗  ██╗ █████╗ ████████╗   ██████╗     ██████╗██╗     ██╗ ",
+    "  ██╔════╝██║  ██║██╔══██╗╚══██╔══╝   ╚════██╗   ██╔════╝██║     ██║ ",
+    "  ██║     ███████║███████║   ██║       █████╔╝   ██║     ██║     ██║ ",
+    "  ██║     ██╔══██║██╔══██║   ██║      ██╔═══╝    ██║     ██║     ██║ ",
+    "  ╚██████╗██║  ██║██║  ██║   ██║      ███████╗   ╚██████╗███████╗██║ ",
+    "   ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝      ╚══════╝    ╚═════╝╚══════╝╚═╝ "
+  ];
+
+  const mainStr = `${mainLabel}  ${chalk.cyan(mainModel || "")}`;
+  const auxStr  = `${auxLabel}  ${chalk.cyan(auxModel || "")}`;
+  const projStr = `${projectName || "-"}`;
+
+  // Build info rows
+  const infoRows = [
+    `  主AI: ${chalk.bold(mainStr)}`,
+    `  辅助: ${chalk.bold(auxStr)}`,
+    `  项目: ${chalk.bold(projStr)}  ${chalk.dim(workingDir || "")}`
+  ];
+
+  // Top border
+  process.stdout.write("\n");
+  process.stdout.write(chalk.cyan(BOX.tl + BOX.h.repeat(inner) + BOX.tr) + "\n");
+
+  // Logo lines
+  for (const line of logo) {
+    const vw = visualWidth(line);
+    const padL = Math.max(0, Math.floor((inner - vw) / 2));
+    const padR = Math.max(0, inner - padL - vw);
+    process.stdout.write(chalk.cyan(BOX.v) + " ".repeat(padL) + chalk.bold(line) + " ".repeat(padR) + chalk.cyan(BOX.v) + "\n");
+  }
+
+  // Empty gap
+  process.stdout.write(chalk.cyan(BOX.v) + " ".repeat(inner) + chalk.cyan(BOX.v) + "\n");
+
+  // Info rows
+  for (const row of infoRows) {
+    const rw = visualWidth(row);
+    const padR = Math.max(0, inner - rw - 2); // left pad 2
+    process.stdout.write(chalk.cyan(BOX.v) + "  " + row + " ".repeat(padR) + chalk.cyan(BOX.v) + "\n");
+  }
+
+  // Bottom border
+  process.stdout.write(chalk.cyan(BOX.bl + BOX.h.repeat(inner) + BOX.br) + "\n\n");
+}
+
+function visualWidth(s) {
+  let w = 0;
+  // strip ANSI
+  const stripped = s.replace(/\x1b\[[0-9;]*m/g, "");
+  for (const ch of stripped) {
+    const cp = ch.codePointAt(0);
+    if (cp == null) continue;
+    if (
+      (cp >= 0x1100 && cp <= 0x115f) ||
+      (cp >= 0x2329 && cp <= 0x232a) ||
+      (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
+      (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) ||
+      (cp >= 0xfe10 && cp <= 0xfe19) ||
+      (cp >= 0xfe30 && cp <= 0xfe6f) ||
+      (cp >= 0xff01 && cp <= 0xff60) ||
+      (cp >= 0xffe0 && cp <= 0xffe6) ||
+      (cp >= 0x1f300 && cp <= 0x1f64f) ||
+      (cp >= 0x1f680 && cp <= 0x1f6ff) ||
+      (cp >= 0x2600 && cp <= 0x26ff)
+    ) {
+      w += 2;
+    } else {
+      w += 1;
+    }
+  }
+  return w;
+}
+
+// ── 帮助 ──
 
 function printAgentHelp() {
   process.stdout.write(chalk.gray(`

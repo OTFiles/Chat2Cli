@@ -24,9 +24,10 @@ export function createComposite({ name, description = "", workingDir = process.c
     aux: { provider: null, accountId: null, sessionId: null },
     messages: [],
     taskList: [],
+    mainModel: null,
+    auxModel: null,
     createdAt: now,
-    updatedAt: now,
-    model: null
+    updatedAt: now
   };
   writeFileSync(filePath(composite.id), JSON.stringify(composite, null, 2));
   return composite;
@@ -100,8 +101,9 @@ export function updateTaskList(composite, taskList) {
 }
 
 /** 设置使用的模型 */
-export function setModel(composite, model) {
-  composite.model = model;
+export function setModels(composite, mainModel, auxModel) {
+  if (mainModel !== undefined) composite.mainModel = mainModel;
+  if (auxModel !== undefined) composite.auxModel = auxModel;
   return saveComposite(composite);
 }
 

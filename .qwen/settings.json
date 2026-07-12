@@ -8,7 +8,11 @@
   "$version": 4,
   "permissions": {
     "allow": [
-      "Bash(mkdir *)"
+      "Bash(mkdir *)",
+      "Bash(node *)",
+      "Bash(do *)",
+      "Bash(break)",
+      "Bash(done)"
     ]
   }
 }

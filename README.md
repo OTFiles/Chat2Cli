@@ -12,6 +12,7 @@
 - **云端会话同步** - 查看/继续/删除 DeepSeek 网页端的会话历史
 - **OpenAI 兼容 API** - 启动 HTTP 服务，提供 `/v1/models` 和 `/v1/chat/completions` 接口
 - **Function Calling** - API 服务支持 OpenAI 兼容的 `tools`/`tool_choice` 工具调用
+- **AI Agent 模式** - 主 AI + 辅助 AI 双账号协作，支持 shell/文件读写/文件搜索/任务清单工具调用
 - **API Key 管理** - 生成分发 API Key，支持自定义 Key 值，每个 Key 可绑定到独立账号
 - **模型切换** - 对话中随时切换模型
 - **Markdown 渲染** - 支持标题/代码块/表格/列表等，可通过 `--no-markdown` 关闭
@@ -179,6 +180,62 @@ curl http://127.0.0.1:3000/v1/chat/completions \
   }'
 ```
 
+### `chat2cli agent` — AI Agent 模式
+
+```bash
+# 新建或继续复合对话
+chat2cli agent
+
+# 强制新建
+chat2cli agent --new
+
+# 新建并指定项目名
+chat2cli agent --new "我的项目"
+
+# 列出所有复合对话
+chat2cli agent --list
+
+# 继续指定复合对话
+chat2cli agent --continue <id>
+
+# 删除指定复合对话
+chat2cli agent --delete <id>
+```
+
+Agent 模式使用**主 AI + 辅助 AI** 双账号协作，能自动使用工具完成编程任务。首次运行时会交互式选择两个 AI 的账号，之后自动记住选择（存储在 `~/.chat2cli/data.json` 的 `agent` 配置中）。
+
+**支持的工具有**:
+
+| 工具 | 功能 | 说明 |
+|------|------|------|
+| `shell` | Shell 命令执行 | 危险操作（rm -rf、git push --force 等）需用户确认 |
+| `file-read` | 文件读取 | 支持指定行范围 |
+| `file-write` | 文件写入 | mode=create 创建新文件 / mode=replace 替换内容 |
+| `file-search` | 文件搜索 | type=content 搜索文件内容 / type=filename 搜索文件名 |
+| `todo` | 任务清单管理 | 每次对话自动发送，确保 AI 记住任务进度 |
+
+**TUI 内置命令**:
+
+| 命令 | 说明 |
+|------|------|
+| `/exit` | 退出 Agent |
+| `/clear` | 清屏 |
+| `/todo` | 查看当前任务清单 |
+| `/context` | 查看当前复合对话上下文（主/辅 AI、消息数） |
+| `/aux <任务>` | 将简单子任务委托给辅助 AI 执行 |
+| `/help` | 显示帮助 |
+
+**快捷键**:
+
+| 按键 | 功能 |
+|------|------|
+| `Ctrl+C` | 中断当前 Agent 循环，进入人工指导模式 |
+| `↑↓` | 历史输入导航 |
+| `Ctrl+A/E` | 行首/行尾 |
+| `Ctrl+K/U` | 删除到行尾/行首 |
+
+**复合对话**：Agent 模式将一次完整的项目协作包装为"复合对话"，底层维护多个远程会话（主 AI + 辅助 AI），用户只需选择复合对话即可恢复整个项目上下文，无需手动管理底层的远程会话 ID。
+
 ## 支持的模型
 
 ### DeepSeek
@@ -250,7 +307,18 @@ cli/
 │   │   ├── history.js            # 历史管理
 │   │   ├── config.js             # 配置管理
 │   │   ├── apikey.js             # API Key 管理
-│   │   └── serve.js              # API 服务入口
+│   │   ├── serve.js              # API 服务入口
+│   │   └── agent.js              # Agent 命令入口
+│   ├── agent/
+│   │   ├── agent-loop.js         # Agent 循环编排
+│   │   ├── tui.js                # Agent TUI
+│   │   ├── prompts/
+│   │   │   ├── main-system.js    # 主 AI 系统提示词
+│   │   │   └── aux-system.js     # 辅助 AI 系统提示词
+│   │   ├── tools/
+│   │   │   └── registry.js       # 工具注册 + 执行
+│   │   └── storage/
+│   │       └── composite.js      # 复合对话存储
 │   ├── providers/
 │   │   ├── base.js               # Provider 抽象基类
 │   │   ├── registry.js           # Provider 注册中心
@@ -266,7 +334,8 @@ cli/
 │   └── utils/
 │       ├── id.js                 # ID 生成
 │       ├── sse.js                # SSE 流解析
-│       └── format.js             # 终端格式化
+│       ├── format.js             # 终端格式化
+│       └── markdown.js           # Markdown 渲染
 └── package.json
 ```
 
