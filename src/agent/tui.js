@@ -68,39 +68,38 @@ export async function agentTui(context) {
     return Math.max(1, Math.ceil(w / termWidth()));
   }
 
-  // 可见区域：最多 5 行
+  // 可见区域：固定 5 行（输入区高度不变，避免 footer 被挤掉）
   const MAX_VISIBLE = 5;
   let scrollOffset = 0; // 已滚出屏幕顶部的行数
 
   function visibleInputLines() {
-    return Math.min(MAX_VISIBLE, totalInputLines());
+    return MAX_VISIBLE;
   }
 
   function drawFooter() {
-    const vis = visibleInputLines();
     const W = termWidth();
-    // 顶分隔
     process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
-    // 输入空行
-    for (let i = 0; i < vis; i++) process.stdout.write("\n");
-    // 底分隔
+    for (let i = 0; i < MAX_VISIBLE; i++) process.stdout.write("\n");
     process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
-    // 帮助
     process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
-    // 回退到首空行
-    const up = 2 + vis; // 底分隔 + 帮助 + 空行数
+    const up = 2 + MAX_VISIBLE;
     process.stdout.write(`\x1b[${up}A\r`);
     process.stdout.write(PROMPT);
+    cursorRelLine = 0;
+    cursorRelCol = 0;
   }
 
   function clearFooter() {
-    const vis = visibleInputLines();
-    process.stdout.write(`\x1b[${vis + 1}E\x1b[J\r`);
+    process.stdout.write(`\x1b[${MAX_VISIBLE + 1}E\x1b[J\r`);
   }
 
   function redrawPrompt() {
-    const vis = visibleInputLines();
-    const tw = termWidth() - PW;
+    const vis = MAX_VISIBLE;
+    const tw = termWidth() - PW;       // 折行宽度
+    const safeW = Math.max(0, tw - 1); // 渲染宽度留 1 列防自动折行
+
+    // 回到输入区顶部（上次 positionCursor 可能把光标移到了编辑位置）
+    moveToTop();
 
     const inBurstView = pasteChunks.length > 0 && currentInput.length > 300;
 
@@ -127,17 +126,26 @@ export async function agentTui(context) {
       if (scrollOffset > maxOff) scrollOffset = maxOff;
       const visible = wrapLines.slice(scrollOffset, scrollOffset + Math.min(vis, wrapLines.length));
 
-      for (let i = 0; i < vis; i++) process.stdout.write("\r\x1b[K\n");
-      process.stdout.write(`\x1b[${vis}A`);
+      // 单遍渲染：每行先 \r\x1b[K 清整行，再写内容
       for (let i = 0; i < vis; i++) {
         if (i < visible.length) {
           const pre = (i === 0 && scrollOffset === 0) ? PROMPT : CONT;
-          process.stdout.write("\r" + pre + truncateByVisualWidth(visible[i], tw) + "\x1b[K\n");
+          process.stdout.write("\r\x1b[K" + pre + truncateByVisualWidth(visible[i], safeW) + "\n");
         } else {
           process.stdout.write("\r\x1b[K\n");
         }
       }
       process.stdout.write(`\x1b[${vis}A`);
+      cursorRelLine = 0;
+      cursorRelCol = 0;
+    } else if (burstMode && currentInput.length > 300) {
+      // 无 pasteChunk 时的降级显示
+      const visAlt = Math.min(MAX_VISIBLE, 1);
+      process.stdout.write("\r\x1b[K" + PROMPT + chalk.gray(`[… ${currentInput.length} 字符 …]`) + "\n");
+      for (let i = 1; i < visAlt; i++) process.stdout.write("\r\x1b[K\n");
+      process.stdout.write(`\x1b[${visAlt}A`);
+      cursorRelLine = 0;
+      cursorRelCol = 0;
     } else {
       // 正常模式：按视觉宽度折行
       const allChars = Array.from(currentInput);
@@ -157,12 +165,11 @@ export async function agentTui(context) {
       if (scrollOffset > maxOff) scrollOffset = maxOff;
       const visible = wrapLines.slice(scrollOffset, scrollOffset + vis);
 
-      for (let i = 0; i < vis; i++) process.stdout.write("\r\x1b[K\n");
-      process.stdout.write(`\x1b[${vis}A`);
+      // 单遍渲染：每行先 \r\x1b[K 清整行，再写内容
       for (let i = 0; i < vis; i++) {
         if (i < visible.length) {
           const pre = (i === 0 && scrollOffset === 0) ? PROMPT : CONT;
-          process.stdout.write("\r" + pre + truncateByVisualWidth(visible[i], tw) + "\x1b[K\n");
+          process.stdout.write("\r\x1b[K" + pre + truncateByVisualWidth(visible[i], safeW) + "\n");
         } else {
           process.stdout.write("\r\x1b[K\n");
         }
@@ -174,7 +181,9 @@ export async function agentTui(context) {
     }
   }
 
-  /** 将光标移到当前字符位置对应的视觉位置 */
+  /** 将光标移到当前字符位置对应的视觉位置，记录相对于输入区顶部的行偏移 */
+  let cursorRelLine = 0;
+  let cursorRelCol = 0;
   function positionCursor(wrapLines) {
     // 找出光标在哪一行
     let cursorLine = 0, charCount = 0;
@@ -194,8 +203,16 @@ export async function agentTui(context) {
     const relLine = cursorLine - scrollOffset;
     if (relLine < 0 || relLine >= visibleInputLines()) return;
 
-    process.stdout.write(`\x1b[${relLine}B`);
-    process.stdout.write(`\x1b[${col}G`); // 绝对列（1-based）
+    if (relLine > 0) process.stdout.write(`\x1b[${relLine}B`);
+    process.stdout.write(`\x1b[${col + 1}G`); // 1-based
+    cursorRelLine = relLine;
+    cursorRelCol = col;
+  }
+
+  /** 从编辑位置回到输入区顶部（行首） */
+  function moveToTop() {
+    if (cursorRelLine > 0) process.stdout.write(`\x1b[${cursorRelLine}A`);
+    process.stdout.write("\r");
   }
 
   // 初始绘制

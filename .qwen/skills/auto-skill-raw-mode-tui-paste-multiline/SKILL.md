@@ -1,8 +1,9 @@
 ---
 name: raw-mode-tui-paste-multiline
-description: Fix paste truncation, multi-line wrapping, CJK ghost text, and burst-mode UX in Node.js raw-mode TUI input handlers. Covers burst detection, atomic paste deletion, multi-line scroll, visual-width truncation, two-pass terminal rendering, and footer adaptation.
+description: Fix paste truncation, multi-line wrapping, CJK ghost text, and burst-mode UX in Node.js raw-mode TUI input handlers. Covers burst detection, atomic paste deletion, multi-line scroll, visual-width truncation, single-pass \x1b[0G\x1b[K rendering, prompt prefix on first line only, cursor positioning after redraw, burst chunk persistence, and footer adaptation.
 source: auto-skill
 extracted_at: '2026-07-13T02:33:53.133Z'
+updated_at: '2026-07-13T05:02:45.808Z'
 ---
 
 # Raw Mode TUI Paste & Multi-line Fix
@@ -233,25 +234,44 @@ writing new content — do NOT skip the clear pass.
 
 ### 6. Multi-line Aware Footer
 
-Draw footer with variable blank rows matching the visible input height:
+**CRITICAL: Use fixed MAX_VISIBLE height, not dynamic `visibleInputLines()`.**
+
+Draw footer with **fixed** blank rows (always MAX_VISIBLE, e.g. 5), not
+dynamically based on current input length. Otherwise when the user types text
+that wraps into more lines, the input rendering overwrites the separator and
+help text that were positioned assuming fewer input lines.
 
 ```js
-function drawFooter(visibleLines) {
-  const vis = visibleLines || 1;
+function drawFooter() {
   const W = termWidth();
-  process.stdout.write(dim("─".repeat(W)) + "\n");    // top separator
-  for (let i = 0; i < vis; i++) process.stdout.write("\n"); // input rows
-  process.stdout.write(dim("─".repeat(W)) + "\n");    // bottom separator
-  process.stdout.write("   " + dim("help text") + "\n");  // help line
+  process.stdout.write(dim("─".repeat(W)) + "\n");         // top separator
+  for (let i = 0; i < MAX_VISIBLE; i++) process.stdout.write("\n"); // ALWAYS 5 blank rows
+  process.stdout.write(dim("─".repeat(W)) + "\n");         // bottom separator
+  process.stdout.write("   " + dim("help text") + "\n");   // help line
   // Back to first input row
-  process.stdout.write(`\x1b[${2 + vis}A\r`);
+  process.stdout.write(`\x1b[${2 + MAX_VISIBLE}A\x1b[0G`);
   process.stdout.write("   ❯ ");
 }
 
-function clearFooter(visibleLines) {
-  const vis = visibleLines || 1;
-  process.stdout.write(`\x1b[${vis + 1}E\x1b[J\r`);  // down vis+1, clear to end
+function clearFooter() {
+  process.stdout.write(`\x1b[${MAX_VISIBLE + 1}E\x1b[J\x1b[0G`);
 }
+```
+
+And `visibleInputLines()` must always return `MAX_VISIBLE`:
+
+```js
+const MAX_VISIBLE = 5;
+
+function visibleInputLines() {
+  return MAX_VISIBLE; // NEVER use Math.min(MAX_VISIBLE, totalInputLines())
+}
+```
+
+**Why this matters:** If `visibleInputLines()` returns 1 when input is empty and
+5 when input wraps, `drawFooter()` allocates only 1 blank row initially. When
+the user types text that wraps to 5 rows, `redrawPrompt()` renders 5 rows over
+the footer's separator and help text. Fixed allocation prevents this entirely.
 
 ```js
 function redrawPrompt() {
@@ -313,6 +333,8 @@ Same for the echo line after Enter is pressed (the "   ❯ user message" line).
   on the first `\r`, discarding the rest
 - Terminal `\r` only moves to column 0 of the *current* line; wrapped lines
   above remain visible, causing visual corruption
+- In raw mode, `\r` behavior varies across terminals (e.g., Termux on Android);
+  `\x1b[0G` (cursor horizontal absolute) is more reliable
 
 ## When to Apply
 
@@ -321,3 +343,186 @@ Any Node.js CLI tool with:
 - Character-by-character input processing in a `data` event handler
 - A fixed-position footer or status bar below the input area
 - Users who paste multi-line text (code snippets, URLs, logs)
+
+## Single-Pass Rendering with `\x1b[0G\x1b[K`
+
+**Problem:** Two-pass rendering (clear pass then write pass using `\r\x1b[K\n`
++ `\r` + text + `\x1b[K\n`) can cause frame overlap on terminals where `\n`
+in raw mode does not reset the column to 0. The cursor drifts rightward
+across successive lines, creating ghost text from previous frames.
+
+**Solution:** Single-pass — each line self-clears before writing:
+
+```js
+// ── DO THIS (single-pass) ──
+for (let i = 0; i < vis; i++) {
+  if (i < visible.length) {
+    const pre = (i === 0 && scrollOffset === 0) ? PROMPT : CONT;
+    process.stdout.write("\x1b[0G\x1b[K" + pre + truncateByVisualWidth(visible[i], safeW) + "\n");
+  } else {
+    process.stdout.write("\x1b[0G\x1b[K\n");
+  }
+}
+process.stdout.write(`\x1b[${vis}A`); // move back to top
+
+// ── DO NOT use two-pass on unreliable terminals ──
+// for (let i = 0; i < vis; i++) process.stdout.write("\r\x1b[K\n");   // clear pass
+// process.stdout.write(`\x1b[${vis}A`);
+// for (let i = 0; i < vis; i++) { ... }                                 // write pass
+```
+
+**Why `\x1b[0G` not `\r`:** `\x1b[0G` (cursor horizontal absolute, column 0) is
+explicit and works identically on all terminals. `\r` (carriage return, code 13)
+can be intercepted or behave differently in raw mode (some terminals treat it
+as CRLF, others as just CR). Always prefer `\x1b[0G` in raw-mode rendering.
+
+**safeW calculation:** Use `termWidth - promptWidth - 1` (not `- 2`):
+- The `-1` margin is relative to `tw` (the wrapping width), not the full terminal width
+- `tw = termWidth - promptWidth` determines where text wraps
+- `safeW = tw - 1` ensures rendered text never reaches the terminal's last column
+- A CJK character whose right half lands on the last column triggers auto-wrap;
+  subtracting just 1 column (not 2) is sufficient because `truncateByVisualWidth`
+  already prevents half-characters at the boundary
+
+## Prompt Prefix on First Line Only
+
+For multi-line input, show the prompt symbol (`❯ `, `> `) only on the first
+visible line. Continuation lines use spaces of the same visual width:
+
+```js
+const PROMPT = "   ❯ ";    // visual width = PW (e.g., 6 for ❯ which is double-width)
+const CONT   = "      ";   // same visual width as PROMPT, all spaces
+
+// In rendering loop:
+const pre = (i === 0 && scrollOffset === 0) ? PROMPT : CONT;
+//                ^^^^^^    ^^^^^^^^^^^^^^^^
+//                first     AND   not scrolled
+//                visible         past start
+//                line
+```
+
+**Conditions:** Both `i === 0` (first visible line) AND `scrollOffset === 0`
+(not scrolled past the beginning) must be true. If the user has scrolled up
+(`scrollOffset > 0`), even the first visible line is a continuation.
+
+```js
+function totalInputLines() {
+  let w = PW;  // must match visual width of PROMPT
+  for (const ch of currentInput) w += charWidth(ch);
+  return Math.max(1, Math.ceil(w / termWidth()));
+}
+```
+
+## Cursor Positioning After Redraw
+
+After rendering the input area, compute the cursor's visual position from its
+character index and move the terminal cursor there.
+
+### The moveToTop() Problem (Critical)
+
+**Bug:** `positionCursor()` moves the cursor to the edit position (e.g., line 2
+of the input area). The NEXT call to `redrawPrompt()` starts rendering from that
+position, NOT from the top of the input area. Lines 0-1 from the previous frame
+are NOT cleared, causing ghost text and old `❯` prompts to persist.
+
+**Fix:** Track the cursor's relative line offset and move back to the top before
+every render:
+
+```js
+let cursorRelLine = 0;
+
+/** Always call at the start of redrawPrompt(), before any rendering */
+function moveToTop() {
+  if (cursorRelLine > 0) process.stdout.write(`\x1b[${cursorRelLine}A`);
+  process.stdout.write("\x1b[0G");
+}
+
+function positionCursor(wrapLines) {
+  // ... find cursorLine, col, relLine ...
+
+  process.stdout.write(`\x1b[${relLine}B`);
+  process.stdout.write(`\x1b[${col}G`);
+  cursorRelLine = relLine;   // ← save for next moveToTop()
+}
+
+function redrawPrompt() {
+  moveToTop();               // ← MUST be the first thing
+
+  // ... compute wrapLines, render vis lines ...
+  // ... positionCursor(wrapLines) ...
+}
+
+// Reset in drawFooter() and burst view branches:
+function drawFooter() {
+  // ... draw ...
+  cursorRelLine = 0;
+}
+```
+
+**Also reset `cursorRelLine = 0`** in `drawFooter()`, all burst view branches
+of `redrawPrompt()`, and after Ctrl+C abort handlers. Any path that repositions
+the cursor to the top of the input area must reset the tracking variable.
+
+### Full positionCursor Implementation
+
+```js
+function positionCursor(wrapLines) {
+  // 1. Find which wrap line contains the cursor
+  let cursorLine = 0, charCount = 0;
+  for (let i = 0; i < wrapLines.length; i++) {
+    const len = Array.from(wrapLines[i]).length;
+    if (charCount + len >= cursor) { cursorLine = i; break; }
+    charCount += len;
+    if (i === wrapLines.length - 1) cursorLine = i;
+  }
+
+  // 2. Column offset within that line (visual cols)
+  const lineBefore = wrapLines[cursorLine].slice(0, cursor - charCount);
+  let col = (cursorLine === 0 && scrollOffset === 0) ? PW : CONT.length;
+  for (const ch of lineBefore) col += charWidth(ch);
+
+  // 3. Relative to visible area
+  const relLine = cursorLine - scrollOffset;
+  if (relLine < 0 || relLine >= vis) return;
+
+  // 4. Move cursor
+  process.stdout.write(`\x1b[${relLine}B`);  // down relLine rows
+  process.stdout.write(`\x1b[${col}G`);      // absolute column (1-based)
+  cursorRelLine = relLine;                    // save for next moveToTop()
+}
+```
+
+**Call `positionCursor` at the end of `redrawPrompt`** (not during burst view).
+
+## Burst Chunk Persistence (Don't Clear on Timeout)
+
+**Problem:** Clearing `pasteChunks` when the burst timeout fires (300ms
+after last paste event) causes the `[…]` collapsed view to immediately
+expand when the user types or deletes a single character.
+
+**Fix:** Separate `burstMode` (transient — "are we currently receiving a
+paste burst?") from paste chunk storage (durable — "was any text pasted
+in this input session?"). Only clear pasteChunks on Enter or Ctrl+C.
+
+```js
+// Burst detection
+if (str.length > 1) {
+  burstMode = true;
+  pasteChunks.push({ start: cursor, end: cursor + str.length });
+} else if (now - lastDataTime > 300) {
+  burstMode = false;
+  // DO NOT clear pasteChunks here — the collapsed view should persist
+}
+
+// Display condition: based on pasteChunks, not burstMode
+const inBurstView = pasteChunks.length > 0 && currentInput.length > 300;
+
+// Backspace during burst view: delete last chunk atomically
+if (pasteChunks.length > 0 && currentInput.length > 300) {
+  const lastChunk = pasteChunks.pop();
+  // ... splice out lastChunk from input ...
+  if (pasteChunks.length === 0) resetPasteMode(); // only clear when all gone
+  redrawPrompt();
+  continue;
+}
+```
