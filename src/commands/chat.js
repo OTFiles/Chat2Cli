@@ -471,28 +471,43 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
     for (const ch of (val || "")) w += (ch.charCodeAt(0) > 127 ? 2 : 1);
     return Math.max(1, Math.ceil(w / termWidth()));
   }
-  const MAX_VISIBLE = 5;
+  const maxVisible = Math.max(3, Math.min(8, Math.floor((process.stdout.rows || 24) * 0.2)));
   let scrollOffset = 0;
+  let footerVis = 1;
 
   function visibleInputLines(val) {
-    return MAX_VISIBLE;
+    return Math.max(1, Math.min(totalInputLines(val || ""), maxVisible));
   }
 
   function drawInputFooter(val) {
+    const vis = visibleInputLines(val);
+    footerVis = vis;
     const W = termWidth();
-    process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
-    for (let i = 0; i < MAX_VISIBLE; i++) process.stdout.write("\n");
-    process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+    process.stdout.write("\r\x1b[J");
+    _drawBorderChat(W, 0, val || "");
+    for (let i = 0; i < vis; i++) process.stdout.write("\n");
+    _drawBorderChat(W, 1, val || "");
     process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
-    const up = 2 + MAX_VISIBLE;
+    const up = 2 + vis;
     process.stdout.write(`\x1b[${up}A\r`);
     process.stdout.write(PROMPT_CHAT);
     cursorRelLine = 0;
     cursorRelCol = 0;
   }
 
+  function _drawBorderChat(W, type, val) {
+    const above = type === 0 ? scrollOffset : Math.max(0, totalInputLines(val) - (scrollOffset + visibleInputLines(val)));
+    if (above > 0) {
+      const label = type === 0 ? ` ↑ ${above} more ` : ` ↓ ${above} more `;
+      const avail = Math.max(1, W - label.length);
+      process.stdout.write(chalk.dim("─".repeat(avail) + label) + "\n");
+    } else {
+      process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+    }
+  }
+
   function clearInputFooter(val) {
-    process.stdout.write(`\x1b[${MAX_VISIBLE + 1}E\x1b[J\r`);
+    process.stdout.write(`\x1b[${footerVis + 2}E\x1b[J\r`);
   }
 
   // ── 绘制 footer + 定位到 prompt 行 ──
@@ -527,10 +542,38 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       let cursorRelCol = 0;
 
       function redrawPrompt() {
-        // 回到输入区顶部
-        if (cursorRelLine > 0) process.stdout.write(`\x1b[${cursorRelLine}A`);
-        process.stdout.write("\r");
+        const newVis = visibleInputLines(input);
 
+        // 如果可见行数变了，需要重绘 footer（边框也会变）
+        if (newVis !== footerVis) {
+          if (cursorRelLine > 0) process.stdout.write(`\x1b[${cursorRelLine}A`);
+          process.stdout.write("\r");
+          process.stdout.write("\x1b[J");
+          footerVis = newVis;
+          const W = termWidth();
+          _drawBorderChat(W, 0, input);
+          for (let i = 0; i < newVis; i++) process.stdout.write("\n");
+          _drawBorderChat(W, 1, input);
+          process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
+          const up = 2 + newVis;
+          process.stdout.write(`\x1b[${up}A\r`);
+          cursorRelLine = 0;
+          cursorRelCol = 0;
+        } else {
+          if (cursorRelLine > 0) process.stdout.write(`\x1b[${cursorRelLine}A`);
+          process.stdout.write("\r");
+          // 如果正在滚动，重绘上/下边框指示器
+          if (scrollOffset > 0 || totalInputLines(input) > maxVisible) {
+            const W = termWidth();
+            process.stdout.write(`\x1b[${newVis + 2}A\r`);
+            _drawBorderChat(W, 0, input);
+            process.stdout.write(`\x1b[${newVis + 1}E\r`);
+            _drawBorderChat(W, 1, input);
+            process.stdout.write(`\x1b[${newVis + 2}A\r`);
+          }
+        }
+
+        const vis = newVis;
         const tw = termWidth() - PROMPT_CHAT.length;       // 折行宽度
         const safeW = Math.max(0, tw - 1);                 // 渲染宽度留 1 列防自动折行
         const allChars = Array.from(input);
@@ -543,9 +586,21 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
         }
         wrapLines.push(line);
 
-        const vis = MAX_VISIBLE;
+        // 自动调整 scrollOffset 使光标可见
+        let cursorLine = 0, charCount = 0;
+        for (let i = 0; i < wrapLines.length; i++) {
+          const len = Array.from(wrapLines[i]).length;
+          if (charCount + len >= cursor) { cursorLine = i; break; }
+          charCount += len;
+          if (i === wrapLines.length - 1) cursorLine = i;
+        }
+
         const maxOff = Math.max(0, wrapLines.length - vis);
         if (scrollOffset > maxOff) scrollOffset = maxOff;
+        if (scrollOffset < 0) scrollOffset = 0;
+        if (cursorLine < scrollOffset) scrollOffset = cursorLine;
+        else if (cursorLine >= scrollOffset + vis) scrollOffset = cursorLine - vis + 1;
+        scrollOffset = Math.max(0, Math.min(scrollOffset, maxOff));
 
         const visible = wrapLines.slice(scrollOffset, scrollOffset + vis);
         // 单遍渲染：每行 \r\x1b[K 清整行再写内容
@@ -563,7 +618,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       }
 
       function clearAfterPrompt() {
-        const vis = Math.min(MAX_VISIBLE, Math.max(1, totalInputLines(input)));
+        const vis = visibleInputLines(input);
         process.stdout.write(`\x1b[${vis}E\x1b[J\r`);
       }
 
@@ -651,7 +706,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
                   let line = "", lw = 0;
                   for (const c of allChars) { const cw = charWidth(c); if (lw + cw > tw && line.length) { wrapLines.push(line); line = ""; lw = 0; } line += c; lw += cw; }
                   wrapLines.push(line);
-                  const maxOff = Math.max(0, wrapLines.length - Math.min(MAX_VISIBLE, Math.max(1, wrapLines.length)));
+                  const maxOff = Math.max(0, wrapLines.length - visibleInputLines(input));
                   if (scrollOffset < maxOff) scrollOffset++;
                 }
                 redrawPrompt();

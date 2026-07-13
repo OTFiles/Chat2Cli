@@ -68,65 +68,133 @@ export async function agentTui(context) {
     return Math.max(1, Math.ceil(w / termWidth()));
   }
 
-  // 可见区域：固定 5 行（输入区高度不变，避免 footer 被挤掉）
-  const MAX_VISIBLE = 5;
+  // 可见区域：动态高度（默认 1 行，最大为终端高度的 20%，至少 3 行）
+  const maxVisible = Math.max(3, Math.min(8, Math.floor((process.stdout.rows || 24) * 0.2)));
   let scrollOffset = 0; // 已滚出屏幕顶部的行数
+  let footerVis = 1;    // 当前 footer 绘制时用的可见行数
 
   function visibleInputLines() {
-    return MAX_VISIBLE;
+    return Math.max(1, Math.min(totalInputLines(), maxVisible));
   }
 
   function drawFooter() {
+    const vis = visibleInputLines();
+    footerVis = vis;
     const W = termWidth();
-    process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
-    for (let i = 0; i < MAX_VISIBLE; i++) process.stdout.write("\n");
-    process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+    // 清除当前位置到屏底
+    process.stdout.write("\r\x1b[J");
+    // 上边框
+    _drawBorder(W, 0);
+    // 输入行
+    for (let i = 0; i < vis; i++) process.stdout.write("\n");
+    // 下边框
+    _drawBorder(W, 1);
     process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
-    const up = 2 + MAX_VISIBLE;
+    // 回到 prompt 行
+    const up = 2 + vis;
     process.stdout.write(`\x1b[${up}A\r`);
     process.stdout.write(PROMPT);
     cursorRelLine = 0;
     cursorRelCol = 0;
   }
 
+  /** type: 0=上边框, 1=下边框 */
+  function _drawBorder(W, type) {
+    const above = type === 0 ? scrollOffset : Math.max(0, totalInputLines() - (scrollOffset + visibleInputLines()));
+    if (above > 0) {
+      const label = type === 0 ? ` ↑ ${above} more ` : ` ↓ ${above} more `;
+      const avail = Math.max(1, W - label.length);
+      process.stdout.write(chalk.dim("─".repeat(avail) + label) + "\n");
+    } else {
+      process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+    }
+  }
+
   function clearFooter() {
-    process.stdout.write(`\x1b[${MAX_VISIBLE + 1}E\x1b[J\r`);
+    // 以当前 footer 高度 + 1 行刷新到屏底
+    process.stdout.write(`\x1b[${footerVis + 2}E\x1b[J\r`);
   }
 
   function redrawPrompt() {
-    const vis = MAX_VISIBLE;
+    const newVis = visibleInputLines();
+
+    // 如果可见行数变了，需要重绘 footer（边框也会变）
+    if (newVis !== footerVis) {
+      // 先回到输入区顶部，清除旧 footer，再画新的
+      if (cursorRelLine > 0) process.stdout.write(`\x1b[${cursorRelLine}A`);
+      process.stdout.write("\r");
+      // 清除旧 footer（footerVis + 2 边框 + 1 help）
+      process.stdout.write(`\x1b[J`);
+      footerVis = newVis;
+      const W = termWidth();
+      _drawBorder(W, 0);
+      for (let i = 0; i < newVis; i++) process.stdout.write("\n");
+      _drawBorder(W, 1);
+      process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
+      const up = 2 + newVis;
+      process.stdout.write(`\x1b[${up}A\r`);
+      cursorRelLine = 0;
+      cursorRelCol = 0;
+    } else {
+      // 回到输入区顶部
+      moveToTop();
+      // 如果正在滚动，重绘上/下边框指示器
+      if (scrollOffset > 0 || totalInputLines() > maxVisible) {
+        const W = termWidth();
+        // 上移到上边框行
+        process.stdout.write(`\x1b[${newVis + 2}A\r`);
+        _drawBorder(W, 0);
+        // 下移到下边框行
+        process.stdout.write(`\x1b[${newVis + 1}E\r`);
+        _drawBorder(W, 1);
+        // 回到输入区首行
+        process.stdout.write(`\x1b[${newVis + 2}A\r`);
+      }
+    }
+
+    const vis = newVis;
     const tw = termWidth() - PW;       // 折行宽度
     const safeW = Math.max(0, tw - 1); // 渲染宽度留 1 列防自动折行
-
-    // 回到输入区顶部（上次 positionCursor 可能把光标移到了编辑位置）
-    moveToTop();
 
     const inBurstView = pasteChunks.length > 0 && currentInput.length > 300;
 
     if (inBurstView) {
-      // burst 模式：保留粘贴前的文字，只折叠粘贴部分
+      // burst 模式：显示粘贴前 + 折叠标记 + 粘贴后
       const prePasteStart = pasteChunks[0].start;
+      const lastEnd = pasteChunks[pasteChunks.length - 1].end;
       const prePaste = currentInput.slice(0, prePasteStart);
+      const postPaste = currentInput.slice(lastEnd);
       const pasteLen = pasteChunks.reduce((s, c) => s + (c.end - c.start), 0);
       let prefix = prePaste;
-      if (prePaste.length > 40) prefix = "…" + prePaste.slice(-40);
-      const label = chalk.gray(` […${pasteLen} 字符 …]`);
+      if (prePaste.length > 30) prefix = "…" + prePaste.slice(-30);
+      let suffix = postPaste;
+      if (postPaste.length > 30) suffix = postPaste.slice(0, 30) + "…";
+      const label = chalk.gray(` […${pasteLen} 字符 …] `);
+      const displayText = prefix + label + suffix;
 
+      // 对 displayText 折行（label 是 ANSI 字符串，不计宽度时应去色计算）
       const wrapLines = [];
       let line = "", lineW = 0;
-      for (const ch of prefix) {
-        const cw = charWidth(ch);
+      for (const ch of displayText) {
+        const cw = ch === "\x1b" ? 0 : charWidth(ch);
         if (lineW + cw > tw && line.length > 0) { wrapLines.push(line); line = ""; lineW = 0; }
         line += ch; lineW += cw;
       }
-      line += label;
+      // 去掉 chalk 色码再计宽：纯文本宽度可能超过 tw, 折行时忽略色码
       wrapLines.push(line);
 
-      const maxOff = Math.max(0, wrapLines.length - Math.min(vis, wrapLines.length));
+      // 确保光标可见（burst view 中光标通常在 prefix 末尾）
+      let cursorLine = 0;
+      if (cursor >= prePasteStart && cursor < lastEnd) {
+        // 光标在粘贴块内，显示在 prefix 末尾
+        cursorLine = 0;
+      }
+      const maxOff = Math.max(0, wrapLines.length - vis);
       if (scrollOffset > maxOff) scrollOffset = maxOff;
-      const visible = wrapLines.slice(scrollOffset, scrollOffset + Math.min(vis, wrapLines.length));
+      if (cursorLine < scrollOffset) scrollOffset = cursorLine;
+      else if (cursorLine >= scrollOffset + vis) scrollOffset = cursorLine - vis + 1;
 
-      // 单遍渲染：每行先 \r\x1b[K 清整行，再写内容
+      const visible = wrapLines.slice(scrollOffset, scrollOffset + Math.min(vis, wrapLines.length));
       for (let i = 0; i < vis; i++) {
         if (i < visible.length) {
           const pre = (i === 0 && scrollOffset === 0) ? PROMPT : CONT;
@@ -140,7 +208,7 @@ export async function agentTui(context) {
       cursorRelCol = 0;
     } else if (burstMode && currentInput.length > 300) {
       // 无 pasteChunk 时的降级显示
-      const visAlt = Math.min(MAX_VISIBLE, 1);
+      const visAlt = Math.min(vis, 1);
       process.stdout.write("\r\x1b[K" + PROMPT + chalk.gray(`[… ${currentInput.length} 字符 …]`) + "\n");
       for (let i = 1; i < visAlt; i++) process.stdout.write("\r\x1b[K\n");
       process.stdout.write(`\x1b[${visAlt}A`);
@@ -161,8 +229,23 @@ export async function agentTui(context) {
       }
       wrapLines.push(line);
 
+      // 自动调整 scrollOffset 使光标可见
+      let cursorLine = 0, charCount = 0;
+      for (let i = 0; i < wrapLines.length; i++) {
+        const len = Array.from(wrapLines[i]).length;
+        if (charCount + len >= cursor) { cursorLine = i; break; }
+        charCount += len;
+        if (i === wrapLines.length - 1) cursorLine = i;
+      }
+
       const maxOff = Math.max(0, wrapLines.length - vis);
       if (scrollOffset > maxOff) scrollOffset = maxOff;
+      if (scrollOffset < 0) scrollOffset = 0;
+      // 光标不可见时调整 scroll
+      if (cursorLine < scrollOffset) scrollOffset = cursorLine;
+      else if (cursorLine >= scrollOffset + vis) scrollOffset = cursorLine - vis + 1;
+      scrollOffset = Math.max(0, Math.min(scrollOffset, maxOff));
+
       const visible = wrapLines.slice(scrollOffset, scrollOffset + vis);
 
       // 单遍渲染：每行先 \r\x1b[K 清整行，再写内容
@@ -177,14 +260,14 @@ export async function agentTui(context) {
       process.stdout.write(`\x1b[${vis}A`);
 
       // 光标定位
-      positionCursor(wrapLines);
+      positionCursor(wrapLines, vis);
     }
   }
 
   /** 将光标移到当前字符位置对应的视觉位置，记录相对于输入区顶部的行偏移 */
   let cursorRelLine = 0;
   let cursorRelCol = 0;
-  function positionCursor(wrapLines) {
+  function positionCursor(wrapLines, vis) {
     // 找出光标在哪一行
     let cursorLine = 0, charCount = 0;
     for (let i = 0; i < wrapLines.length; i++) {
@@ -194,17 +277,17 @@ export async function agentTui(context) {
       if (i === wrapLines.length - 1) cursorLine = i;
     }
 
-    // 该行上光标前的视觉列数
+    // 该行上光标前的视觉列数（考虑滚动后首行前缀）
     const lineBefore = wrapLines[cursorLine].slice(0, cursor - charCount);
     let col = (cursorLine === 0 && scrollOffset === 0) ? PW : CONT.length;
     for (const ch of lineBefore) col += charWidth(ch);
 
     // 相对可见区的位置
     const relLine = cursorLine - scrollOffset;
-    if (relLine < 0 || relLine >= visibleInputLines()) return;
+    if (relLine < 0 || relLine >= vis) return;
 
     if (relLine > 0) process.stdout.write(`\x1b[${relLine}B`);
-    process.stdout.write(`\x1b[${col + 1}G`); // 1-based
+    process.stdout.write(`\x1b[${col + 1}G`); // 1-based ANSI column
     cursorRelLine = relLine;
     cursorRelCol = col;
   }

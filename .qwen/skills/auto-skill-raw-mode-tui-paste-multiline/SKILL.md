@@ -354,13 +354,13 @@ across successive lines, creating ghost text from previous frames.
 **Solution:** Single-pass — each line self-clears before writing:
 
 ```js
-// ── DO THIS (single-pass) ──
+// ── DO THIS (single-pass, using \r for column 0) ──
 for (let i = 0; i < vis; i++) {
   if (i < visible.length) {
     const pre = (i === 0 && scrollOffset === 0) ? PROMPT : CONT;
-    process.stdout.write("\x1b[0G\x1b[K" + pre + truncateByVisualWidth(visible[i], safeW) + "\n");
+    process.stdout.write("\r\x1b[K" + pre + truncateByVisualWidth(visible[i], safeW) + "\n");
   } else {
-    process.stdout.write("\x1b[0G\x1b[K\n");
+    process.stdout.write("\r\x1b[K\n");
   }
 }
 process.stdout.write(`\x1b[${vis}A`); // move back to top
@@ -371,10 +371,24 @@ process.stdout.write(`\x1b[${vis}A`); // move back to top
 // for (let i = 0; i < vis; i++) { ... }                                 // write pass
 ```
 
-**Why `\x1b[0G` not `\r`:** `\x1b[0G` (cursor horizontal absolute, column 0) is
-explicit and works identically on all terminals. `\r` (carriage return, code 13)
-can be intercepted or behave differently in raw mode (some terminals treat it
-as CRLF, others as just CR). Always prefer `\x1b[0G` in raw-mode rendering.
+**Why `\r` not `\x1b[0G`:** `\x1b[0G` (cursor horizontal absolute with parameter 0)
+has **undefined behavior** on many terminals — ANSI spec says column 0 is
+invalid. Some terminals treat `\x1b[0G` as `\x1b[1G` (column 1), others ignore
+it entirely. `\r` (carriage return, code 13) is the only reliable way to return
+to column 0. Always prefer `\r` in raw-mode rendering, and use `\x1b[${col}G`
+for explicit column positioning (with col >= 1).
+
+**ANSI escape sequence parameter pitfalls:**
+
+| Sequence | Problem | Fix |
+|----------|---------|-----|
+| `\x1b[0G` | Parameter 0 = undefined; terminals may treat as 1 or ignore | Use `\r` for column 0 |
+| `\x1b[0B` | Parameter 0 defaults to 1 on many terminals → double movement | Guard: `if (n > 0) write(\`\\x1b[${n}B\`)` |
+| `\x1b[${col}G` | Column values are **1-based** in ANSI, not 0-based | Use `\x1b[${col + 1}G` for 0-based `col` |
+| `\x1b[0A` | Same as `\x1b[0B` — 0 defaults to 1 | Guard: `if (n > 0) write(\`\\x1b[${n}A\`)` |
+
+In practice, these guards are essential on Android/Termux where ANSI
+implementations are less strict than desktop terminals.
 
 **safeW calculation:** Use `termWidth - promptWidth - 1` (not `- 2`):
 - The `-1` margin is relative to `tw` (the wrapping width), not the full terminal width
@@ -434,7 +448,7 @@ let cursorRelLine = 0;
 /** Always call at the start of redrawPrompt(), before any rendering */
 function moveToTop() {
   if (cursorRelLine > 0) process.stdout.write(`\x1b[${cursorRelLine}A`);
-  process.stdout.write("\x1b[0G");
+  process.stdout.write("\r"); // \r is reliable; \x1b[0G has undefined behavior
 }
 
 function positionCursor(wrapLines) {
@@ -485,10 +499,10 @@ function positionCursor(wrapLines) {
   const relLine = cursorLine - scrollOffset;
   if (relLine < 0 || relLine >= vis) return;
 
-  // 4. Move cursor
-  process.stdout.write(`\x1b[${relLine}B`);  // down relLine rows
-  process.stdout.write(`\x1b[${col}G`);      // absolute column (1-based)
-  cursorRelLine = relLine;                    // save for next moveToTop()
+  // 4. Move cursor (ANSI columns are 1-based, so col + 1)
+  if (relLine > 0) process.stdout.write(`\x1b[${relLine}B`); // guard: 0 → 1 on some terminals
+  process.stdout.write(`\x1b[${col + 1}G`);                  // 1-based column
+  cursorRelLine = relLine;                                    // save for next moveToTop()
 }
 ```
 
