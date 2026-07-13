@@ -74,19 +74,36 @@ Main AI handles planning and complex tool use. Auxiliary AI handles simple, inde
 
 **Aux prompt:** Lightweight system prompt that strips out planning instructions and only includes read-only tools (shell, file-read, file-search). Aux responses are appended to the composite conversation.
 
-### 5. Tool Result Format
+### 5. Tool Result Format — COMPACT (not JSON)
 
-Tool results must be appended as structured messages so the AI can continue reasoning:
+**Critical insight:** Sending full JSON tool results back to the AI causes token exhaustion. The AI wastes output tokens echoing the JSON structure in its thinking, and the cumulative prompt size from 40 messages of 2000-char JSON can exceed 80K chars.
+
+**Solution:** Format each tool result as compact human-readable text with NO JSON wrapper:
 
 ```js
-messages.push({
-  role: "tool",
-  content: JSON.stringify(toolResult.result, null, 2),
-  toolName, toolResult
-});
+function formatToolResultCompact(toolName, result) {
+  switch (toolName) {
+    case "shell":
+      return `命令: ${result.command}\n退出: ${result.exitCode}\nstdout:\n${result.stdout.slice(-3000)}`;
+    case "file-read":
+      return `(行 ${result.offset}-${result.offset + result.lines} / 共 ${result.totalLines} 行)\n${result.content.slice(0, 3000)}`;
+    case "file-write":
+      return result.success ? `已写入: ${result.path}` : `写入失败: ${result.error}`;
+    case "file-search":
+      return `找到 ${result.count} 处匹配:\n${matches.slice(0, 20).map(m => `${m.file}:${m.line}  ${m.text}`).join('\n')}`;
+    case "todo":
+      return (result.tasks || []).map(t => `[${t.status}] ${t.content}`).join('\n');
+  }
+}
+
+// Then:
+const resultText = formatToolResultCompact(toolName, toolResult.result);
+appendMessage(composite, { role: "tool", content: resultText, ... });
 ```
 
-The `tool` role is recognized by `buildPromptFromMessages()` which prepends `Tool result for <name>:` to the content.
+And in `buildMessagesForMain`, tool messages no longer need the redundant `工具 xxx 结果:\n` prefix — just send the compact content directly, with `slice(0, 4000)` for safety.
+
+**Why this prevents thinking interruption:** The AI receives 500-1500 chars of useful text per tool result instead of 2000+ chars of JSON with structural overhead. It spends fewer output tokens "thinking" about tool results, leaving headroom for actual reasoning.
 
 ### 6. Iteration Limit
 
@@ -150,31 +167,49 @@ Every external tool call must leave a visible trace in the terminal UI. Use dist
 ### Shell
 
 ```
-   $ ls -la /tmp                              ← gray, dim, first 2 lines of command
-    ✓ SHELL                                   ← green ✓ or red ✗ in bold
-   drwx------  2 root root 4096 ...           ← output last 5 lines
+    ✓ SHELL  $ ls -la /tmp                     ← icon + SHELL + command all on SAME line
+   drwx------  2 root root 4096 ...            ← output last 5 lines below
    -rw-r--r--  1 root root   42 ...
 ```
 
 **Rules:**
-- Command truncated to first 2 lines, max 200 chars; append `…` if truncated
-- Output taken from `stderr || stdout`, last 5 lines, max 500 chars
-- If `result.error` exists and stderr is empty, append it in red
-- Icon: green ` ✓ ` on success, red ` ✗ ` on failure, always followed by bold `SHELL`
+- Command and SHELL label on the **same line**: `icon + bold("SHELL") + "  $ " + gray(cmdShort)`
+- Command truncated to 120 chars, `\n` replaced with space
+- Output from `stderr || stdout`, last 5 lines, max 500 chars
+- Icon: green ` ✓ ` on success, red ` ✗ ` on failure
 
 ### File Read / File Write
 
 ```
-   ✓ FILE-READ  /path/to/file  (行 0-42)      ← path + line range in gray
-   │ line 1                                    ← content lines, gray │ prefix
-   │ line 2
-   │ … (共 120 行，已截断)                      ← truncation notice
+   ✓ FILE-READ  /path/to/file  (行 0-42 / 共 200 行)   ← path + line range ONLY, no content
 ```
 
 **Rules:**
-- Cap at **50 lines**; show truncation notice with total count
-- Content lines prefixed with gray `   │ `
-- Empty files shown as `(空文件)`
+- Show **only path + line range**, do NOT emit file content in the UI (the AI sees it via the agent loop; the user gets the compact path + range summary)
+- Write: `✓ FILE-WRITE  已写入: /path` in one line
+
+### Thinking Display Pattern
+
+When the AI is reasoning, show a labeled indicator with a rolling tail of the last 4 thinking lines:
+
+```js
+let thinkingBuf = "", thinkingActive = false;
+
+case "thinking":
+  if (!thinkingActive) { printThinkingLabel(); thinkingActive = true; }
+  thinkingBuf += event.text;
+  redrawThinkingTail(4);  // in-place refresh of last 4 lines, gray
+  break;
+
+case "response":
+  clearThinkingDisplay();  // remove thinking tail from screen
+  renderMarkdown(event.text, true);
+  break;
+```
+
+**`redrawThinkingTail`**: Calculate the last 4 lines of `thinkingBuf`, move cursor up by that many rows, clear to bottom of screen, redraw them in `chalk.gray`, cursor back to start.
+
+**`clearThinkingDisplay`**: Move up by the tail line count and clear to bottom. Called before rendering response text to avoid overlap.
 
 ### File Search
 

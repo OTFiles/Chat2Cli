@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import { runAgentLoop, runAuxCall } from "./agent-loop.js";
 import {
-  printFooter, printUserMsg, printThinkingLabel, BOX, termWidth
+  printUserMsg, printThinkingLabel, BOX, termWidth
 } from "../utils/format.js";
 import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
@@ -45,74 +45,225 @@ export async function agentTui(context) {
     return (c.charCodeAt(0) > 127) ? 2 : 1;
   }
 
-  // 计算当前输入占用的终端行数
-  function inputLines() {
-    const promptW = 4; // "   ❯ " = 4 chars
-    let w = promptW;
+  /** 按视觉宽度截断字符串（CJK 计 2 列），避免终端自动换行残留 */
+  function truncateByVisualWidth(s, maxW) {
+    let w = 0;
+    for (let i = 0; i < s.length; i++) {
+      const cw = charWidth(s[i]);
+      if (w + cw > maxW) return s.slice(0, i);
+      w += cw;
+    }
+    return s;
+  }
+
+  // 输入文本的终端行数
+  const PW = 6; // "   ❯ " 视觉宽度（❯ = 双列宽）
+  const PROMPT = "   ❯ ";
+  const CONT   = "      "; // 续行前缀，与 PROMPT 等宽
+  const CONT_CHAT = "    "; // chat 模式用（> 是单列宽）
+
+  function totalInputLines() {
+    let w = PW;
     for (const ch of currentInput) w += charWidth(ch);
-    const tw = termWidth();
-    return Math.max(1, Math.ceil(w / tw));
+    return Math.max(1, Math.ceil(w / termWidth()));
   }
 
-  function redrawPrompt() {
-    const lines = inputLines();
-    // 多行时先上移到首行
-    if (lines > 1) {
-      process.stdout.write(`\x1b[${lines - 1}A`);
-    }
-    process.stdout.write("\r   ❯ ");
+  // 可见区域：最多 5 行
+  const MAX_VISIBLE = 5;
+  let scrollOffset = 0; // 已滚出屏幕顶部的行数
 
-    // 超过 300 字符时显示摘要
-    if (currentInput.length > 300) {
-      process.stdout.write(chalk.gray(`[共 ${currentInput.length} 个字符]`));
-    } else {
-      process.stdout.write(currentInput);
-    }
-    process.stdout.write("\x1b[0K");
-    if (cursor < currentInput.length) {
-      const left = Array.from(currentInput.slice(cursor));
-      const cols = left.reduce((s, c) => s + charWidth(c), 0);
-      if (cols > 0) process.stdout.write(`\x1b[${cols}D`);
-    }
-  }
-
-  function clearFooter() {
-    const lines = inputLines();
-    process.stdout.write(`\x1b[${lines + 1}A\r\x1b[J`);
+  function visibleInputLines() {
+    return Math.min(MAX_VISIBLE, totalInputLines());
   }
 
   function drawFooter() {
-    const lines = inputLines();
-    printFooter();
-    process.stdout.write(`\x1b[${lines + 1}A\r`);
-    process.stdout.write("   ❯ ");
+    const vis = visibleInputLines();
+    const W = termWidth();
+    // 顶分隔
+    process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+    // 输入空行
+    for (let i = 0; i < vis; i++) process.stdout.write("\n");
+    // 底分隔
+    process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+    // 帮助
+    process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
+    // 回退到首空行
+    const up = 2 + vis; // 底分隔 + 帮助 + 空行数
+    process.stdout.write(`\x1b[${up}A\r`);
+    process.stdout.write(PROMPT);
+  }
+
+  function clearFooter() {
+    const vis = visibleInputLines();
+    process.stdout.write(`\x1b[${vis + 1}E\x1b[J\r`);
+  }
+
+  function redrawPrompt() {
+    const vis = visibleInputLines();
+    const tw = termWidth() - PW;
+
+    const inBurstView = pasteChunks.length > 0 && currentInput.length > 300;
+
+    if (inBurstView) {
+      // burst 模式：保留粘贴前的文字，只折叠粘贴部分
+      const prePasteStart = pasteChunks[0].start;
+      const prePaste = currentInput.slice(0, prePasteStart);
+      const pasteLen = pasteChunks.reduce((s, c) => s + (c.end - c.start), 0);
+      let prefix = prePaste;
+      if (prePaste.length > 40) prefix = "…" + prePaste.slice(-40);
+      const label = chalk.gray(` […${pasteLen} 字符 …]`);
+
+      const wrapLines = [];
+      let line = "", lineW = 0;
+      for (const ch of prefix) {
+        const cw = charWidth(ch);
+        if (lineW + cw > tw && line.length > 0) { wrapLines.push(line); line = ""; lineW = 0; }
+        line += ch; lineW += cw;
+      }
+      line += label;
+      wrapLines.push(line);
+
+      const maxOff = Math.max(0, wrapLines.length - Math.min(vis, wrapLines.length));
+      if (scrollOffset > maxOff) scrollOffset = maxOff;
+      const visible = wrapLines.slice(scrollOffset, scrollOffset + Math.min(vis, wrapLines.length));
+
+      for (let i = 0; i < vis; i++) process.stdout.write("\r\x1b[K\n");
+      process.stdout.write(`\x1b[${vis}A`);
+      for (let i = 0; i < vis; i++) {
+        if (i < visible.length) {
+          const pre = (i === 0 && scrollOffset === 0) ? PROMPT : CONT;
+          process.stdout.write("\r" + pre + truncateByVisualWidth(visible[i], tw) + "\x1b[K\n");
+        } else {
+          process.stdout.write("\r\x1b[K\n");
+        }
+      }
+      process.stdout.write(`\x1b[${vis}A`);
+    } else {
+      // 正常模式：按视觉宽度折行
+      const allChars = Array.from(currentInput);
+      const wrapLines = [];
+      let line = "", lineW = 0;
+      for (const ch of allChars) {
+        const cw = charWidth(ch);
+        if (lineW + cw > tw && line.length > 0) {
+          wrapLines.push(line);
+          line = ""; lineW = 0;
+        }
+        line += ch; lineW += cw;
+      }
+      wrapLines.push(line);
+
+      const maxOff = Math.max(0, wrapLines.length - vis);
+      if (scrollOffset > maxOff) scrollOffset = maxOff;
+      const visible = wrapLines.slice(scrollOffset, scrollOffset + vis);
+
+      for (let i = 0; i < vis; i++) process.stdout.write("\r\x1b[K\n");
+      process.stdout.write(`\x1b[${vis}A`);
+      for (let i = 0; i < vis; i++) {
+        if (i < visible.length) {
+          const pre = (i === 0 && scrollOffset === 0) ? PROMPT : CONT;
+          process.stdout.write("\r" + pre + truncateByVisualWidth(visible[i], tw) + "\x1b[K\n");
+        } else {
+          process.stdout.write("\r\x1b[K\n");
+        }
+      }
+      process.stdout.write(`\x1b[${vis}A`);
+
+      // 光标定位
+      positionCursor(wrapLines);
+    }
+  }
+
+  /** 将光标移到当前字符位置对应的视觉位置 */
+  function positionCursor(wrapLines) {
+    // 找出光标在哪一行
+    let cursorLine = 0, charCount = 0;
+    for (let i = 0; i < wrapLines.length; i++) {
+      const len = Array.from(wrapLines[i]).length;
+      if (charCount + len >= cursor) { cursorLine = i; break; }
+      charCount += len;
+      if (i === wrapLines.length - 1) cursorLine = i;
+    }
+
+    // 该行上光标前的视觉列数
+    const lineBefore = wrapLines[cursorLine].slice(0, cursor - charCount);
+    let col = (cursorLine === 0 && scrollOffset === 0) ? PW : CONT.length;
+    for (const ch of lineBefore) col += charWidth(ch);
+
+    // 相对可见区的位置
+    const relLine = cursorLine - scrollOffset;
+    if (relLine < 0 || relLine >= visibleInputLines()) return;
+
+    process.stdout.write(`\x1b[${relLine}B`);
+    process.stdout.write(`\x1b[${col}G`); // 绝对列（1-based）
   }
 
   // 初始绘制
   drawFooter();
 
+  // ═══════════════════════════════════════════════
+  //  Burst 检测 + pasteChunks
+  // ═══════════════════════════════════════════════
+
+  let lastDataTime = 0;
+  let burstMode = false;
+  const pasteChunks = []; // [{start, end}] — 原子删除单元
+
+  function resetPasteMode() {
+    burstMode = false;
+    pasteChunks.length = 0;
+    scrollOffset = 0;
+  }
+
+  function adjustChunksAfterDelete(pos, len) {
+    for (const c of pasteChunks) {
+      if (c.start >= pos) { c.start -= len; c.end -= len; }
+      else if (c.end > pos) { c.end -= len; }
+    }
+  }
+
+  function deleteChunkAt(pos) {
+    const idx = pasteChunks.findIndex(c => c.end === pos);
+    if (idx === -1) return false;
+    const c = pasteChunks[idx];
+    const arr = Array.from(currentInput);
+    arr.splice(c.start, c.end - c.start);
+    currentInput = arr.join("");
+    cursor = c.start;
+    const removed = c.end - c.start;
+    pasteChunks.splice(idx, 1);
+    adjustChunksAfterDelete(c.start, removed);
+    return true;
+  }
+
   // ── 按键处理 ──
   const onData = (buf) => {
+    const now = Date.now();
     const str = buf.toString();
 
-    // 粘贴检测：单次 data 事件超过 3 个字符视为粘贴
-    const isPaste = str.length > 3;
+    // Burst 检测：多字节事件必定是粘贴，单字节慢速则退出 burst（但保留 chunks）
+    if (str.length > 1) {
+      burstMode = true;
+      pasteChunks.push({ start: cursor, end: cursor + str.length });
+    } else if (now - lastDataTime > 300) {
+      burstMode = false;
+      // 不清理 pasteChunks — 折叠视图由 currentInput.length > 300 控制
+    }
+    lastDataTime = now;
 
     for (const ch of str) {
       const code = ch.charCodeAt(0);
 
-      // Ctrl+C: 中断 agent 循环
+      // Ctrl+C
       if (code === 3) {
         if (abortController) {
           abortController.abort();
           abortController = null;
           process.stdout.write("\n   " + chalk.yellow("⚠ 已中断，进入人工指导模式（输入指令或空行继续）") + "\n\n");
-          currentInput = "";
-          cursor = 0;
+          currentInput = ""; cursor = 0; scrollOffset = 0;
           drawFooter();
           return;
         }
-        // 正常退出
         process.stdout.write("\n\n");
         process.stdin.setRawMode(wasRaw);
         process.stdin.removeListener("data", onData);
@@ -120,7 +271,7 @@ export async function agentTui(context) {
         return;
       }
 
-      // 退出: Ctrl+D 在空行
+      // Ctrl+D
       if (code === 4 && !currentInput) {
         process.stdout.write("\n");
         process.stdin.setRawMode(wasRaw);
@@ -128,138 +279,140 @@ export async function agentTui(context) {
         return;
       }
 
-      // Enter: 粘贴时忽略（避免 \r 截断），正常输入时发送
+      // Enter：burst 中跳过 \r
       if (code === 13) {
-        if (isPaste) continue;
+        if (burstMode) continue;
         clearFooter();
         const input = currentInput.trim();
-        currentInput = "";
-        cursor = 0;
+        resetPasteMode();
+        currentInput = ""; cursor = 0;
         process.stdout.write("\r\x1b[J\n");
-
         if (input) {
-          inputHistory.push(input);
-          histIdx = -1;
+          inputHistory.push(input); histIdx = -1;
           handleInput(input);
         } else {
-          // 空行：如果在中断模式，恢复
           drawFooter();
         }
         return;
       }
 
-      // Escape sequences
+      // Ctrl+U/K：删除时退出 burst
+      if (code === 21 || code === 11) {
+        burstMode = false; pasteChunks.length = 0;
+      }
+
+      // Escape
       if (code === 27) { escState = 1; continue; }
       if (escState === 1 && ch === "[") { escState = 2; continue; }
 
       if (escState === 2) {
         escState = 0;
-
-        // Up arrow
         if (ch === "A") {
+          // ↑：先尝试历史回溯，否则滚动可见区
           if (inputHistory.length > 0 && histIdx < inputHistory.length - 1) {
             histIdx++;
             currentInput = inputHistory[inputHistory.length - 1 - histIdx];
-            cursor = currentInput.length;
-            redrawPrompt();
+            cursor = currentInput.length; scrollOffset = 0;
+          } else if (!burstMode && scrollOffset > 0) {
+            scrollOffset--;
           }
+          redrawPrompt();
           continue;
         }
-        // Down arrow
         if (ch === "B") {
           if (histIdx > 0) {
-            histIdx--;
-            currentInput = inputHistory[inputHistory.length - 1 - histIdx];
-            cursor = currentInput.length;
+            histIdx--; currentInput = inputHistory[inputHistory.length - 1 - histIdx];
+            cursor = currentInput.length; scrollOffset = 0;
           } else if (histIdx === 0) {
-            histIdx = -1;
-            currentInput = "";
-            cursor = 0;
+            histIdx = -1; currentInput = ""; cursor = 0; scrollOffset = 0;
+          } else if (!burstMode) {
+            const maxOff = Math.max(0, totalInputLines() - visibleInputLines());
+            if (scrollOffset < maxOff) scrollOffset++;
           }
           redrawPrompt();
           continue;
         }
-        // Left arrow
-        if (ch === "D") {
-          if (cursor > 0) cursor--;
-          redrawPrompt();
-          continue;
-        }
-        // Right arrow
-        if (ch === "C") {
-          if (cursor < currentInput.length) cursor++;
-          redrawPrompt();
-          continue;
-        }
-        // Home
+        if (ch === "D") { if (cursor > 0) cursor--; redrawPrompt(); continue; }
+        if (ch === "C") { if (cursor < currentInput.length) cursor++; redrawPrompt(); continue; }
         if (ch === "H") { cursor = 0; redrawPrompt(); continue; }
-        // End
         if (ch === "F") { cursor = currentInput.length; redrawPrompt(); continue; }
         continue;
       }
       escState = 0;
 
-      // Backspace
+      // Backspace：有粘贴块时删除整块；正常模式按字符删除
       if (code === 127) {
         if (cursor > 0) {
+          if (pasteChunks.length > 0 && currentInput.length > 300) {
+            // 删除最后一块粘贴
+            const lastChunk = pasteChunks.pop();
+            const arr = Array.from(currentInput);
+            arr.splice(lastChunk.start, lastChunk.end - lastChunk.start);
+            currentInput = arr.join("");
+            cursor = lastChunk.start;
+            adjustChunksAfterDelete(lastChunk.start, lastChunk.end - lastChunk.start);
+            if (pasteChunks.length === 0) resetPasteMode();
+            redrawPrompt();
+            continue;
+          }
+          if (deleteChunkAt(cursor)) {
+            redrawPrompt(); continue;
+          }
           const arr = Array.from(currentInput);
           arr.splice(cursor - 1, 1);
-          currentInput = arr.join("");
-          cursor--;
+          currentInput = arr.join(""); cursor--;
+          adjustChunksAfterDelete(cursor, 1);
           redrawPrompt();
         }
         continue;
       }
 
-      // Ctrl+K: 删除到行尾
+      // Ctrl+K / Ctrl+U
       if (code === 11) {
         currentInput = Array.from(currentInput).slice(0, cursor).join("");
-        redrawPrompt();
-        continue;
+        redrawPrompt(); continue;
       }
-
-      // Ctrl+U: 删除到行首
       if (code === 21) {
         currentInput = Array.from(currentInput).slice(cursor).join("");
-        cursor = 0;
-        redrawPrompt();
-        continue;
+        cursor = 0; redrawPrompt(); continue;
       }
 
-      // Ctrl+A: 行首
+      // Ctrl+A/E
       if (code === 1) { cursor = 0; redrawPrompt(); continue; }
-
-      // Ctrl+E: 行尾
       if (code === 5) { cursor = currentInput.length; redrawPrompt(); continue; }
 
-      // Tab: 忽略
+      // Tab
       if (code === 9) continue;
 
-      // 换行符：粘贴时插入空格，非粘贴时忽略
+      // \n：burst → 空格
       if (code === 10) {
-        if (isPaste) {
-          const arr = Array.from(currentInput);
-          arr.splice(cursor, 0, " ");
-          currentInput = arr.join("");
-          cursor++;
+        if (burstMode) {
+          const arr = Array.from(currentInput); arr.splice(cursor, 0, " ");
+          currentInput = arr.join(""); cursor++;
+          adjustChunksAfterDelete(cursor - 1, -1);
         }
-        if (!isPaste) redrawPrompt();
+        if (!burstMode) redrawPrompt();
         continue;
       }
 
-      // 可打印字符（包含空格）
+      // 可打印字符
       if (code >= 32) {
-        const arr = Array.from(currentInput);
-        arr.splice(cursor, 0, ch);
-        currentInput = arr.join("");
-        cursor++;
-        if (!isPaste) redrawPrompt();
+        const arr = Array.from(currentInput); arr.splice(cursor, 0, ch);
+        currentInput = arr.join(""); cursor++;
+        if (burstMode) {
+          // 更新最后一个 pasteChunk 的 end
+          const last = pasteChunks.at(-1);
+          if (last) last.end++;
+        } else {
+          redrawPrompt();
+        }
         continue;
       }
     }
 
-    // 粘贴结束后一次性重绘
-    if (isPaste && currentInput.length > 0) {
+    // 粘贴/大块输入结束：重设 scroll 到底
+    if (str.length > 1) {
+      scrollOffset = Math.max(0, totalInputLines() - visibleInputLines());
       redrawPrompt();
     }
   };
@@ -275,12 +428,8 @@ export async function agentTui(context) {
       return;
     }
 
-    // 显示用户消息（超长则截断显示）
-    if (input.length > 300) {
-      process.stdout.write("   " + chalk.green("❯") + " " + chalk.gray(`[共 ${input.length} 个字符]`) + "\n");
-    } else {
-      printUserMsg(input);
-    }
+    // 显示用户消息
+    printUserMsg(input.length > 500 ? `[共 ${input.length} 个字符]` : input);
     resetMarkdownRenderer();
     resetThinkingState();
 

@@ -5,7 +5,7 @@ import { getStore, updateStore } from "../storage/store.js";
 import { createId } from "../utils/id.js";
 import {
   printSuccess, printError, printInfo,
-  printChatHeader, printFooter,
+  printChatHeader,
   printUserMsg, printThinkingLabel, accountLabel,
   termWidth
 } from "../utils/format.js";
@@ -463,21 +463,55 @@ export function resetMarkdownState() {
 }
 
 async function chatLoop(provider, messages, currentModel, accountId, sessionId = null, parentMessageId = null, markdown = true, chatOverrides = {}) {
-  // ── 绘制 footer + 定位到 prompt 行 ──
-  function drawFooter() {
-    printFooter();
-    // printFooter 输出 4 行后光标在第 5 行；上移 3 到空白 prompt 行
-    process.stdout.write("\x1b[3A\r");
-    process.stdout.write("   > ");
+  // 输入文本占用的终端行数
+  const PROMPT_CHAT = "   > ";
+  const CONT_CHAT = "    "; // 续行前缀，与 PROMPT_CHAT 等宽（4 列）
+  function totalInputLines(val) {
+    let w = PROMPT_CHAT.length;
+    for (const ch of (val || "")) w += (ch.charCodeAt(0) > 127 ? 2 : 1);
+    return Math.max(1, Math.ceil(w / termWidth()));
+  }
+  const MAX_VISIBLE = 5;
+  let scrollOffset = 0;
+
+  function visibleInputLines(val) {
+    return Math.min(MAX_VISIBLE, totalInputLines(val));
   }
 
-  // 清除旧 footer：Enter 后光标在下分隔线行，上移 2 回到上分隔线行清屏
-  function clearFooter() {
-    process.stdout.write("\x1b[2A\r\x1b[J");
+  function drawInputFooter(val) {
+    const vis = visibleInputLines(val);
+    const W = termWidth();
+    process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+    for (let i = 0; i < vis; i++) process.stdout.write("\n");
+    process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+    process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
+    const up = 2 + vis;
+    process.stdout.write(`\x1b[${up}A\r`);
+    process.stdout.write(PROMPT_CHAT);
   }
+
+  function clearInputFooter(val) {
+    const vis = visibleInputLines(val);
+    process.stdout.write(`\x1b[${vis + 1}E\x1b[J\r`);
+  }
+
+  // ── 绘制 footer + 定位到 prompt 行 ──
+  function drawFooter() { drawInputFooter(""); }
+  function clearFooter() { clearInputFooter(""); }
 
   /** 字符终端列宽（CJK 计 2 列） */
   function charWidth(c) { return c.charCodeAt(0) > 127 ? 2 : 1; }
+
+  /** 按视觉宽度截断字符串（CJK 计 2 列），避免终端自动换行残留 */
+  function truncateByVisualWidth(s, maxW) {
+    let w = 0;
+    for (let i = 0; i < s.length; i++) {
+      const cw = charWidth(s[i]);
+      if (w + cw > maxW) return s.slice(0, i);
+      w += cw;
+    }
+    return s;
+  }
 
   /**
    * raw mode 等待输入 — 支持历史导航、行内编辑、CJK 退格。
@@ -490,25 +524,60 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       let escState = 0;
 
       function redrawPrompt() {
-        // 计算当前输入占用的终端行数
-        const promptW = 4; // "   > " = 4 chars
-        let w = promptW;
-        for (const ch of input) w += charWidth(ch);
-        const tw = termWidth();
-        const lines = Math.max(1, Math.ceil(w / tw));
-        // 多行时先上移到首行
-        if (lines > 1) {
-          process.stdout.write(`\x1b[${lines - 1}A`);
+        const tw = termWidth() - PROMPT_CHAT.length;
+        const allChars = Array.from(input);
+        const wrapLines = [];
+        let line = "", lineW = 0;
+        for (const ch of allChars) {
+          const cw = charWidth(ch);
+          if (lineW + cw > tw && line.length > 0) { wrapLines.push(line); line = ""; lineW = 0; }
+          line += ch; lineW += cw;
         }
-        process.stdout.write("\r");
-        process.stdout.write("   > ");
-        process.stdout.write(input);
-        process.stdout.write("\x1b[0K");
-        if (cursor < input.length) {
-          const leftChars = Array.from(input.slice(cursor));
-          const leftCols = leftChars.reduce((s, c) => s + charWidth(c), 0);
-          process.stdout.write(`\x1b[${leftCols}D`);
+        wrapLines.push(line);
+
+        const vis = Math.min(MAX_VISIBLE, Math.max(1, wrapLines.length));
+        const maxOff = Math.max(0, wrapLines.length - vis);
+        if (scrollOffset > maxOff) scrollOffset = maxOff;
+
+        const visible = wrapLines.slice(scrollOffset, scrollOffset + vis);
+        // 先清空 vis 行
+        for (let i = 0; i < vis; i++) process.stdout.write("\r\x1b[K\n");
+        process.stdout.write(`\x1b[${vis}A`);
+        // 再写内容
+        for (let i = 0; i < vis; i++) {
+          if (i < visible.length) {
+            const pre = (i === 0 && scrollOffset === 0) ? PROMPT_CHAT : CONT_CHAT;
+            process.stdout.write("\r" + pre + truncateByVisualWidth(visible[i], tw) + "\x1b[K\n");
+          } else {
+            process.stdout.write("\r\x1b[K\n");
+          }
         }
+        // 光标回到首行 + 定位
+        process.stdout.write(`\x1b[${vis}A`);
+        positionCursorChat(wrapLines, vis);
+      }
+
+      function clearAfterPrompt() {
+        const vis = Math.min(MAX_VISIBLE, Math.max(1, totalInputLines(input)));
+        process.stdout.write(`\x1b[${vis}E\x1b[J\r`);
+      }
+
+      /** 将光标移到当前字符位置对应的视觉位置 */
+      function positionCursorChat(wrapLines, vis) {
+        let cursorLine = 0, charCount = 0;
+        for (let i = 0; i < wrapLines.length; i++) {
+          const len = Array.from(wrapLines[i]).length;
+          if (charCount + len >= cursor) { cursorLine = i; break; }
+          charCount += len;
+          if (i === wrapLines.length - 1) cursorLine = i;
+        }
+        const lineBefore = wrapLines[cursorLine].slice(0, cursor - charCount);
+        let col = (cursorLine === 0 && scrollOffset === 0) ? PROMPT_CHAT.length : CONT_CHAT.length;
+        for (const ch of lineBefore) col += charWidth(ch);
+        const relLine = cursorLine - scrollOffset;
+        if (relLine < 0 || relLine >= vis) return;
+        process.stdout.write(`\x1b[${relLine}B`);
+        process.stdout.write(`\x1b[${col}G`);
       }
 
       function insertChar(char) {
@@ -552,22 +621,33 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
           if (escState > 0) {
             if (char === "[" && escState === 1) { escState = 2; continue; }
             if (escState === 2) {
-              if (char === "A") { // 上：历史回溯
+              if (char === "A") { // 上：历史回溯 → 无历史时滚动
                 if (history.length > 0 && (historyIdx < history.length - 1)) {
                   if (historyIdx === -1) savedInput = input;
                   historyIdx++;
                   input = history[history.length - 1 - historyIdx];
                   cursor = input.length;
-                  redrawPrompt();
+                } else if (scrollOffset > 0) {
+                  scrollOffset--;
                 }
-              } else if (char === "B") { // 下：历史前进
+                redrawPrompt();
+              } else if (char === "B") { // 下：历史前进 → 无历史时滚动
                 if (historyIdx >= 0) {
                   historyIdx--;
                   input = historyIdx >= 0 ? history[history.length - 1 - historyIdx] : (savedInput || "");
                   cursor = input.length;
                   if (historyIdx < 0) savedInput = "";
-                  redrawPrompt();
+                } else {
+                  const tw = termWidth() - 4;
+                  const allChars = Array.from(input);
+                  const wrapLines = [];
+                  let line = "", lw = 0;
+                  for (const c of allChars) { const cw = charWidth(c); if (lw + cw > tw && line.length) { wrapLines.push(line); line = ""; lw = 0; } line += c; lw += cw; }
+                  wrapLines.push(line);
+                  const maxOff = Math.max(0, wrapLines.length - Math.min(MAX_VISIBLE, Math.max(1, wrapLines.length)));
+                  if (scrollOffset < maxOff) scrollOffset++;
                 }
+                redrawPrompt();
               } else if (char === "C") { // 右
                 if (cursor < Array.from(input).length) {
                   const c = Array.from(input)[cursor];
@@ -600,6 +680,8 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
             if (isPaste) continue;
             process.stdout.write("\r\n");
             cleanup();
+            // 清除多行 footer
+            clearInputFooter(input);
             const text = input.trim();
             if (text) history = [...history, text];
             resolve(text);
