@@ -63,13 +63,16 @@ export async function agentTui(context) {
   const CONT_CHAT = "    "; // chat 模式用（> 是单列宽）
 
   function totalInputLines() {
-    let w = PW;
-    for (const ch of currentInput) w += charWidth(ch);
-    return Math.max(1, Math.ceil(w / termWidth()));
+    let textW = 0;
+    for (const ch of currentInput) textW += charWidth(ch);
+    // 每行可用宽度 = 终端宽度 − 前缀宽度（PW == CONT 视觉宽度）
+    const avail = termWidth() - PW;
+    if (avail <= 0) return 1;
+    return Math.max(1, Math.ceil(textW / avail));
   }
 
-  // 可见区域：动态高度（默认 1 行，最大为终端高度的 20%，至少 3 行）
-  const maxVisible = Math.max(3, Math.min(8, Math.floor((process.stdout.rows || 24) * 0.2)));
+  // 可见区域：最多显示 5 行，超出则滚动
+  let maxVisible = 5;
   let scrollOffset = 0; // 已滚出屏幕顶部的行数
   let footerVis = 1;    // 当前 footer 绘制时用的可见行数
 
@@ -120,12 +123,15 @@ export async function agentTui(context) {
 
     // 如果可见行数变了，需要重绘 footer（边框也会变）
     if (newVis !== footerVis) {
-      // 先回到输入区顶部，清除旧 footer，再画新的
+      // 先回到输入区顶部，再上移一行覆盖旧上边框，然后清除
       if (cursorRelLine > 0) process.stdout.write(`\x1b[${cursorRelLine}A`);
       process.stdout.write("\r");
-      // 清除旧 footer（footerVis + 2 边框 + 1 help）
-      process.stdout.write(`\x1b[J`);
+      process.stdout.write(`\x1b[1A`);   // 上移到旧上边框行
+      process.stdout.write(`\x1b[J`);    // 从旧上边框开始清除到底部
       footerVis = newVis;
+      // 根据新输入尺寸 clamp scrollOffset，避免边框显示过期的溢出指示器
+      const maxOff = Math.max(0, totalInputLines() - newVis);
+      if (scrollOffset > maxOff) scrollOffset = maxOff;
       const W = termWidth();
       _drawBorder(W, 0);
       for (let i = 0; i < newVis; i++) process.stdout.write("\n");
@@ -136,20 +142,17 @@ export async function agentTui(context) {
       cursorRelLine = 0;
       cursorRelCol = 0;
     } else {
-      // 回到输入区顶部
+      // 回到输入区顶部，始终重绘边框（溢出状态可能已改变）
       moveToTop();
-      // 如果正在滚动，重绘上/下边框指示器
-      if (scrollOffset > 0 || totalInputLines() > maxVisible) {
-        const W = termWidth();
-        // 上移到上边框行
-        process.stdout.write(`\x1b[${newVis + 2}A\r`);
-        _drawBorder(W, 0);
-        // 下移到下边框行
-        process.stdout.write(`\x1b[${newVis + 1}E\r`);
-        _drawBorder(W, 1);
-        // 回到输入区首行
-        process.stdout.write(`\x1b[${newVis + 2}A\r`);
-      }
+      const W = termWidth();
+      // prompt → top border: up 1
+      process.stdout.write(`\x1b[1A\r`);
+      _drawBorder(W, 0);
+      // top border → bottom border: down vis (现在在 prompt 行，再往下 vis 行到 bottom border)
+      process.stdout.write(`\x1b[${newVis}E\r`);
+      _drawBorder(W, 1);
+      // bottom border → prompt: up (vis + 1)，因为 _drawBorder 末尾的 \n 让光标在 help 行
+      process.stdout.write(`\x1b[${newVis + 1}A\r`);
     }
 
     const vis = newVis;
@@ -172,15 +175,21 @@ export async function agentTui(context) {
       const label = chalk.gray(` […${pasteLen} 字符 …] `);
       const displayText = prefix + label + suffix;
 
-      // 对 displayText 折行（label 是 ANSI 字符串，不计宽度时应去色计算）
+      // 对 displayText 折行（label 是 ANSI 字符串，需跳过完整转义序列）
       const wrapLines = [];
-      let line = "", lineW = 0;
+      let line = "", lineW = 0, inEscape = false;
       for (const ch of displayText) {
-        const cw = ch === "\x1b" ? 0 : charWidth(ch);
+        if (ch === "\x1b") { inEscape = true; line += ch; continue; }
+        if (inEscape) {
+          line += ch;
+          // CSI 序列以 0x40–0x7E（@–~）范围的字母结尾
+          if (ch.charCodeAt(0) >= 0x40 && ch.charCodeAt(0) <= 0x7E) inEscape = false;
+          continue;
+        }
+        const cw = charWidth(ch);
         if (lineW + cw > tw && line.length > 0) { wrapLines.push(line); line = ""; lineW = 0; }
         line += ch; lineW += cw;
       }
-      // 去掉 chalk 色码再计宽：纯文本宽度可能超过 tw, 折行时忽略色码
       wrapLines.push(line);
 
       // 确保光标可见（burst view 中光标通常在 prefix 末尾）
@@ -204,14 +213,6 @@ export async function agentTui(context) {
         }
       }
       process.stdout.write(`\x1b[${vis}A`);
-      cursorRelLine = 0;
-      cursorRelCol = 0;
-    } else if (burstMode && currentInput.length > 300) {
-      // 无 pasteChunk 时的降级显示
-      const visAlt = Math.min(vis, 1);
-      process.stdout.write("\r\x1b[K" + PROMPT + chalk.gray(`[… ${currentInput.length} 字符 …]`) + "\n");
-      for (let i = 1; i < visAlt; i++) process.stdout.write("\r\x1b[K\n");
-      process.stdout.write(`\x1b[${visAlt}A`);
       cursorRelLine = 0;
       cursorRelCol = 0;
     } else {
@@ -359,9 +360,8 @@ export async function agentTui(context) {
         if (abortController) {
           abortController.abort();
           abortController = null;
-          process.stdout.write("\n   " + chalk.yellow("⚠ 已中断，进入人工指导模式（输入指令或空行继续）") + "\n\n");
           currentInput = ""; cursor = 0; scrollOffset = 0;
-          drawFooter();
+          // handleInput 完成后会自动调用 drawFooter() 并渲染中断消息
           return;
         }
         process.stdout.write("\n\n");
@@ -408,13 +408,13 @@ export async function agentTui(context) {
       if (escState === 2) {
         escState = 0;
         if (ch === "A") {
-          // ↑：先尝试历史回溯，否则滚动可见区
-          if (inputHistory.length > 0 && histIdx < inputHistory.length - 1) {
+          // ↑：优先滚动可见区，滚动到顶后再回溯历史
+          if (!burstMode && scrollOffset > 0) {
+            scrollOffset--;
+          } else if (inputHistory.length > 0 && histIdx < inputHistory.length - 1) {
             histIdx++;
             currentInput = inputHistory[inputHistory.length - 1 - histIdx];
             cursor = currentInput.length; scrollOffset = 0;
-          } else if (!burstMode && scrollOffset > 0) {
-            scrollOffset--;
           }
           redrawPrompt();
           continue;
@@ -443,8 +443,8 @@ export async function agentTui(context) {
       // Backspace：有粘贴块时删除整块；正常模式按字符删除
       if (code === 127) {
         if (cursor > 0) {
-          if (pasteChunks.length > 0 && currentInput.length > 300) {
-            // 删除最后一块粘贴
+          if (pasteChunks.length > 0) {
+            // 删除最后一块粘贴（仅要求粘贴块存在，不设长度阈值）
             const lastChunk = pasteChunks.pop();
             const arr = Array.from(currentInput);
             arr.splice(lastChunk.start, lastChunk.end - lastChunk.start);
@@ -504,6 +504,8 @@ export async function agentTui(context) {
           const last = pasteChunks.at(-1);
           if (last) last.end++;
         } else {
+          // 非粘贴输入：清除旧粘贴块标记，退出折叠视图
+          if (pasteChunks.length > 0) pasteChunks.length = 0;
           redrawPrompt();
         }
         continue;
