@@ -69,40 +69,49 @@ function buildEntryLine(entry, index, selected) {
   const num = String(index).padStart(2, " ");
   const bg = selected ? chalk.bgCyan.black : chalk.reset;
   const maxCols = (process.stdout.columns || 80) - 1; // 预留 1 列防止换行
-  // 前缀: " " + cursor(2) + num(2) + " " = ~5 chars + time(16) + padding = ~25 fixed
-  const prefixLen = 7; // " " + cursor + num + spaces
-  const suffixLen = 18; // " " + time(16) + " "
-  const maxTitle = maxCols - prefixLen - suffixLen;
 
-  if (entry.type === "local") {
-    const tag = chalk.cyan("[本地]");
-    const full = (entry.conv.title || "未命名");
-    const title = fitOneLine(full, maxTitle - 7); // -7 for tag
-    const time = formatTime(entry.conv.updatedAt || entry.conv.createdAt);
-    return bg(` ${cursor}${num} ${tag} ${title}`) + chalk.gray(" ".repeat(Math.max(1, maxTitle - [...title].reduce((s, c) => s + (c.charCodeAt(0) > 127 ? 2 : 1), 0) - 7)) + " " + time);
-  }
-  if (entry.type === "ds") {
-    const tag = chalk.magenta("[云端]");
-    const pinned = entry.session.pinned ? chalk.yellow("★") : " ";
-    const full = (entry.session.title || "未命名");
-    // pinned char (+1)
-    const pinW = pinned.trim() ? 1 : 0;
-    const title = fitOneLine(full, maxTitle - 7 - pinW);
-    const time = formatTime(entry.sortTime);
-    return bg(` ${cursor}${num} ${tag} ${pinned}${title}`) + chalk.gray(" ".repeat(Math.max(1, maxTitle - [...title].reduce((s, c) => s + (c.charCodeAt(0) > 127 ? 2 : 1), 0) - 7 - pinW)) + " " + time);
-  }
-  return "";
+  const isDs = entry.type === "ds";
+  const full = isDs
+    ? (entry.session.title || "未命名")
+    : (entry.conv.title || "未命名");
+  const time = formatTime(isDs ? entry.sortTime : (entry.conv.updatedAt || entry.conv.createdAt));
+  const tag = isDs ? chalk.magenta("[云端]") : chalk.cyan("[本地]");
+  const pinned = isDs && entry.session.pinned ? chalk.yellow("★") : " ";
+
+  // visible layout: " " + cursor + num + " " + tag + " " + pinned + title + pad + " " + time
+  //                    1      2       2     1      4      1       1     titleW   pad    1     16
+  const fixedBefore = 1 + 2 + 2 + 1 + 6 + 1 + 1; // 12 = " ❯01 [云端] ★"
+  const fixedAfter = 1 + 16;                     // 17 = " 2026/07/14 12:00"
+  const maxTitleW = maxCols - fixedBefore - fixedAfter;
+
+  const title = fitOneLine(full, maxTitleW);
+  const titleW = visualWidth(title);
+  const pad = Math.max(0, maxTitleW - titleW);
+
+  return bg(` ${cursor}${num} ${tag} ${pinned}${title}`) +
+    chalk.gray(" ".repeat(pad) + " " + time);
 }
 
-/** 截断文本到 maxCols 列（中文字符计 2 列） */
-function fitOneLine(text, maxLen) {
+/** 截断文本到 maxW 宽（含 "..."），中文/emoji 占 2 */
+function fitOneLine(text, maxW) {
+  const chars = [...text];
   let w = 0;
-  for (let i = 0; i < text.length; i++) {
-    const cw = text.charCodeAt(i) > 127 ? 2 : 1;
-    if (w + cw > maxLen) return text.slice(0, i) + "...";
+  const dotsW = 3;
+  for (let i = 0; i < chars.length; i++) {
+    const cw = (chars[i].codePointAt(0) || 0) > 127 ? 2 : 1;
+    if (w + cw > maxW - dotsW) return chars.slice(0, i).join("") + "...";
     w += cw;
   }
   return text;
+}
+
+/** 计算可见宽度（ASCII 1，其他 2） */
+function visualWidth(s) {
+  let w = 0;
+  for (const c of s) {
+    w += (c.codePointAt(0) || 0) > 127 ? 2 : 1;
+  }
+  return w;
 }
 
 /** 原始模式终端列表选择器，支持底部自动加载更多 */
@@ -466,14 +475,53 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
   // 输入文本占用的终端行数
   const PROMPT_CHAT = "   > ";
   const CONT_CHAT = "    "; // 续行前缀，与 PROMPT_CHAT 等宽（4 列）
+
+  // ── 粘贴标记存储 ──
+  const pasteStore = {};
+  let nextPasteId = 1;
+
+  function insertPasteMarker(text) {
+    const id = nextPasteId++;
+    pasteStore[id] = text;
+    return `[paste:${id}]`;
+  }
+
+  function markerAt(str, pos) {
+    const re = /\[paste:(\d+)\]/g;
+    let m;
+    while ((m = re.exec(str)) !== null) {
+      const start = m.index, end = m.index + m[0].length;
+      if (pos > start && pos <= end) return { id: +m[1], start, end };
+    }
+    return null;
+  }
+
+  function expandMarkers(s) {
+    return s.replace(/\[paste:(\d+)\]/g, (_, id) => pasteStore[id] || `[paste:${id}]`);
+  }
+
+  function clearPasteStore() {
+    for (const k of Object.keys(pasteStore)) delete pasteStore[k];
+    nextPasteId = 1;
+  }
   function totalInputLines(val) {
     let w = PROMPT_CHAT.length;
-    for (const ch of (val || "")) w += (ch.charCodeAt(0) > 127 ? 2 : 1);
+    const s = val || "";
+    const re = /\[paste:\d+\]/g;
+    let lastIdx = 0, m;
+    while ((m = re.exec(s)) !== null) {
+      for (let i = lastIdx; i < m.index; i++) w += (s.charCodeAt(i) > 127 ? 2 : 1);
+      w += m[0].length; // 标记全 ASCII
+      lastIdx = m.index + m[0].length;
+    }
+    for (let i = lastIdx; i < s.length; i++) w += (s.charCodeAt(i) > 127 ? 2 : 1);
     return Math.max(1, Math.ceil(w / termWidth()));
   }
   const maxVisible = Math.max(3, Math.min(8, Math.floor((process.stdout.rows || 24) * 0.2)));
   let scrollOffset = 0;
   let footerVis = 1;
+  let cursorRelLine = 0;
+  let cursorRelCol = 0;
 
   function visibleInputLines(val) {
     return Math.max(1, Math.min(totalInputLines(val || ""), maxVisible));
@@ -507,7 +555,10 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
   }
 
   function clearInputFooter(val) {
-    process.stdout.write(`\x1b[${footerVis + 2}E\x1b[J\r`);
+    // 回到 prompt 行，从那里清到屏底，再跳到 footer 下方
+    process.stdout.write(`\x1b[${footerVis + 1}A`);
+    process.stdout.write(`\x1b[${footerVis + 3}M`);
+    // process.stdout.write(`\x1b[${footerVis + 2}E`); // AI写的，不知道何意味
   }
 
   // ── 绘制 footer + 定位到 prompt 行 ──
@@ -520,9 +571,10 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
   /** 按视觉宽度截断字符串（CJK 计 2 列），避免终端自动换行残留 */
   function truncateByVisualWidth(s, maxW) {
     let w = 0;
-    for (let i = 0; i < s.length; i++) {
-      const cw = charWidth(s[i]);
-      if (w + cw > maxW) return s.slice(0, i);
+    const chars = [...s];
+    for (let i = 0; i < chars.length; i++) {
+      const cw = charWidth(chars[i]);
+      if (w + cw > maxW) return chars.slice(0, i).join("");
       w += cw;
     }
     return s;
@@ -575,14 +627,26 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
 
         const vis = newVis;
         const tw = termWidth() - PROMPT_CHAT.length;       // 折行宽度
-        const safeW = Math.max(0, tw - 1);                 // 渲染宽度留 1 列防自动折行
-        const allChars = Array.from(input);
+        const safeW = Math.max(0, tw);                 // 折行已保证 ≤ tw
+        const allChars = [...input];
         const wrapLines = [];
-        let line = "", lineW = 0;
-        for (const ch of allChars) {
+        let line = "", lineW = 0, i = 0;
+        while (i < allChars.length) {
+          const remaining = allChars.slice(i).join("");
+          const mm = remaining.match(/^\[paste:(\d+)\]/);
+          if (mm) {
+            const marker = mm[0];
+            const mw = marker.length; // 全部 ASCII
+            if (lineW + mw > tw && line.length > 0) { wrapLines.push(line); line = ""; lineW = 0; }
+            line += marker; lineW += mw;
+            i += marker.length;
+            continue;
+          }
+          const ch = allChars[i];
           const cw = charWidth(ch);
           if (lineW + cw > tw && line.length > 0) { wrapLines.push(line); line = ""; lineW = 0; }
           line += ch; lineW += cw;
+          i++;
         }
         wrapLines.push(line);
 
@@ -674,7 +738,17 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
 
       const onData = (chunk) => {
         const str = chunk.toString("utf-8");
-        const isPaste = str.length > 3;
+
+        // 粘贴检测：将大段文本替换为标记
+        if (chunk.length > 20) {
+          const marker = insertPasteMarker(str);
+          const chars = Array.from(input);
+          chars.splice(cursor, 0, ...marker);
+          input = chars.join("");
+          cursor += marker.length;
+          redrawPrompt();
+          return; // 原子插入，跳过后面的逐字循环
+        }
 
         for (const char of str) {
           const code = char.codePointAt(0);
@@ -710,17 +784,29 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
                   if (scrollOffset < maxOff) scrollOffset++;
                 }
                 redrawPrompt();
-              } else if (char === "C") { // 右
-                if (cursor < Array.from(input).length) {
-                  const c = Array.from(input)[cursor];
-                  process.stdout.write(`\x1b[${charWidth(c)}C`);
-                  cursor++;
+              } else if (char === "C") { // 右：跳过标记
+                if (cursor < [...input].length) {
+                  const m = markerAt(input, cursor + 1);
+                  const allChars = [...input];
+                  if (m && cursor === m.start) {
+                    cursor = m.end;
+                    redrawPrompt();
+                  } else {
+                    process.stdout.write(`\x1b[${charWidth(allChars[cursor])}C`);
+                    cursor++;
+                  }
                 }
-              } else if (char === "D") { // 左
+              } else if (char === "D") { // 左：跳过标记
                 if (cursor > 0) {
-                  const c = Array.from(input)[cursor - 1];
-                  process.stdout.write(`\x1b[${charWidth(c)}D`);
-                  cursor--;
+                  const m = markerAt(input, cursor);
+                  const allChars = [...input];
+                  if (m && cursor === m.end) {
+                    cursor = m.start;
+                    redrawPrompt();
+                  } else {
+                    process.stdout.write(`\x1b[${charWidth(allChars[cursor - 1])}D`);
+                    cursor--;
+                  }
                 }
               } else if (char === "H") { // Home
                 const cols = cursorPosToCol();
@@ -737,22 +823,33 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
           }
           if (code === 27) { escState = 1; continue; }
 
-          // Enter: 粘贴时忽略（避免 \r 截断），正常输入时发送
+          // Enter：发送时展开标记
           if (code === 13) {
-            if (isPaste) continue;
             process.stdout.write("\r\n");
             cleanup();
-            // 清除多行 footer
-            clearInputFooter(input);
-            const text = input.trim();
-            if (text) history = [...history, text];
+            const raw = input.trim();
+            const text = expandMarkers(raw);
+            clearPasteStore();
+            if (text) history = [...history, raw];
             resolve(text);
             return;
           }
 
-          // Backspace
+          // Backspace：标记内 → 整块删除
           if (code === 127 || code === 8) {
-            if (cursor > 0) { deleteBefore(); redrawPrompt(); }
+            if (cursor > 0) {
+              const m = markerAt(input, cursor);
+              if (m) {
+                const chars = Array.from(input);
+                chars.splice(m.start, m.end - m.start);
+                input = chars.join("");
+                cursor = m.start;
+                delete pasteStore[m.id];
+              } else {
+                deleteBefore();
+              }
+              redrawPrompt();
+            }
             continue;
           }
 
@@ -774,6 +871,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
           if (code === 5) { cursor = input.length; redrawPrompt(); continue; }
           // Ctrl+K → 删除到行尾
           if (code === 11) {
+            clearPasteStore();
             const chars = Array.from(input);
             input = chars.slice(0, cursor).join("");
             redrawPrompt();
@@ -781,6 +879,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
           }
           // Ctrl+U → 删除到行首
           if (code === 21) {
+            clearPasteStore();
             const chars = Array.from(input);
             const before = chars.slice(0, cursor).join("");
             const after = chars.slice(cursor).join("");
@@ -795,12 +894,13 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
             continue;
           }
 
-          // 可打印字符 + 换行（粘贴时 \n 替换为空格）
-          if (code >= 32 || (!isPaste && code === 10)) {
+          // 可打印字符 + 换行（粘贴已在前面处理，这里都是正常输入）
+          if (code >= 32) {
             insertChar(char);
-            if (!isPaste) redrawPrompt();
-          } else if (code === 10 && isPaste) {
+            redrawPrompt();
+          } else if (code === 10) {
             insertChar(" ");
+            redrawPrompt();
           }
         }
       };
@@ -838,6 +938,10 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       // ── 内置命令 ──
       if (input === "/exit") {
         process.stdout.write(chalk.gray("再见。\n"));
+        return;
+      }
+      if (input === "/exut") {
+        process.stdout.write(chalk.gray("是\"/exit\"而不是\"/exut\"哦～\n再见～\n"));
         return;
       }
       if (input === "/clear") {
