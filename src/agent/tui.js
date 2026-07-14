@@ -57,19 +57,6 @@ export async function agentTui(context) {
     return s;
   }
 
-  /** 计算字符串的视觉宽度，跳过 ANSI 转义序列 */
-  function visualWidthOfText(s) {
-    let w = 0, inEsc = false;
-    for (const ch of s) {
-      if (ch === "\x1b") { inEsc = true; continue; }
-      if (inEsc) {
-        if (ch.charCodeAt(0) >= 0x40 && ch.charCodeAt(0) <= 0x7E) inEsc = false;
-        continue;
-      }
-      w += charWidth(ch);
-    }
-    return w;
-  }
 
   // 输入文本的终端行数
   const PW = 6; // "   ❯ " 视觉宽度（❯ = 双列宽）
@@ -77,12 +64,18 @@ export async function agentTui(context) {
   const CONT   = "      "; // 续行前缀，与 PROMPT 等宽
   const CONT_CHAT = "    "; // chat 模式用（> 是单列宽）
 
-  let inFoldView = false; // 折叠视图标记（由 redrawPrompt 更新）
 
   function totalInputLines() {
     let textW = 0;
-    for (const ch of currentInput) textW += charWidth(ch);
-    // 每行可用宽度 = 终端宽度 − 前缀宽度（PW == CONT 视觉宽度）
+    // 标记 [paste:N] 全部为 ASCII，视觉宽度 = 字符串长度
+    const re = /\[paste:\d+\]/g;
+    let lastIdx = 0, m;
+    while ((m = re.exec(currentInput)) !== null) {
+      for (let i = lastIdx; i < m.index; i++) textW += charWidth(currentInput[i]);
+      textW += m[0].length;
+      lastIdx = m.index + m[0].length;
+    }
+    for (let i = lastIdx; i < currentInput.length; i++) textW += charWidth(currentInput[i]);
     const avail = termWidth() - PW;
     if (avail <= 0) return 1;
     return Math.max(1, Math.ceil(textW / avail));
@@ -94,31 +87,44 @@ export async function agentTui(context) {
   let footerVis = 1;    // 当前 footer 绘制时用的可见行数
 
   function visibleInputLines() {
-    if (inFoldView) return 1;
     return Math.max(1, Math.min(totalInputLines(), maxVisible));
   }
 
-  /** 构建折行信息，供 redrawPrompt 和 ↑↓ handler 复用 */
+  /** 构建折行信息（标记原子化），供 redrawPrompt 和 ↑↓ handler 复用 */
   function getLineInfo() {
-    const allChars = Array.from(currentInput);
+    const allChars = [...currentInput];
     const tw = Math.max(1, termWidth() - PW);
     const wrapLines = [];
-    let line = "", lineW = 0;
-    for (const ch of allChars) {
+    let line = "", lineW = 0, i = 0;
+    while (i < allChars.length) {
+      const remaining = allChars.slice(i).join("");
+      const mm = remaining.match(/^\[paste:(\d+)\]/);
+      if (mm) {
+        const marker = mm[0];
+        const mw = marker.length; // 全部 ASCII，视觉宽度 = 长度
+        if (lineW + mw > tw && line.length > 0) {
+          wrapLines.push(line); line = ""; lineW = 0;
+        }
+        line += marker; lineW += mw;
+        i += marker.length;
+        continue;
+      }
+      const ch = allChars[i];
       const cw = charWidth(ch);
       if (lineW + cw > tw && line.length > 0) {
         wrapLines.push(line); line = ""; lineW = 0;
       }
       line += ch; lineW += cw;
+      i++;
     }
     wrapLines.push(line);
 
     let cursorLine = 0, charCount = 0;
-    for (let i = 0; i < wrapLines.length; i++) {
-      const len = Array.from(wrapLines[i]).length;
-      if (charCount + len >= cursor) { cursorLine = i; break; }
+    for (let j = 0; j < wrapLines.length; j++) {
+      const len = Array.from(wrapLines[j]).length;
+      if (charCount + len >= cursor) { cursorLine = j; break; }
       charCount += len;
-      if (i === wrapLines.length - 1) cursorLine = i;
+      if (j === wrapLines.length - 1) cursorLine = j;
     }
 
     return { wrapLines, cursorLine, charCount };
@@ -147,11 +153,6 @@ export async function agentTui(context) {
 
   /** type: 0=上边框, 1=下边框 */
   function _drawBorder(W, type) {
-    // 折叠视图：纯边框，无溢出指示器
-    if (inFoldView) {
-      process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
-      return;
-    }
     const above = type === 0 ? scrollOffset : Math.max(0, totalInputLines() - (scrollOffset + visibleInputLines()));
     if (above > 0) {
       const label = type === 0 ? ` ↑ ${above} more ` : ` ↓ ${above} more `;
@@ -168,8 +169,6 @@ export async function agentTui(context) {
   }
 
   function redrawPrompt() {
-    // 每次渲染前同步折叠状态
-    inFoldView = pasteChunks.length > 0 && currentInput.length > 300;
     const newVis = visibleInputLines();
 
     // 如果可见行数变了，需要重绘 footer（边框也会变）
@@ -210,90 +209,8 @@ export async function agentTui(context) {
     const tw = Math.max(1, termWidth() - PW);       // 折行宽度
     const safeW = Math.max(0, tw); // 折行已保证每行 ≤ tw，无需再 -1
 
-    const inBurstView = inFoldView;
-
-    if (inBurstView) {
-      // burst 模式：显示粘贴前 + 折叠标记 + 粘贴后（仅 1 行）
-      const foldVis = 1;
-      const prePasteStart = pasteChunks[0].start;
-      const lastEnd = pasteChunks[pasteChunks.length - 1].end;
-      const prePaste = currentInput.slice(0, prePasteStart);
-      const postPaste = currentInput.slice(lastEnd);
-      const pasteLen = pasteChunks.reduce((s, c) => s + (c.end - c.start), 0);
-      let prefix = prePaste;
-      if ([...prePaste].length > 30) prefix = "…" + [...prePaste].slice(-30).join("");
-      let suffix = postPaste;
-      if ([...postPaste].length > 30) suffix = [...postPaste].slice(0, 30).join("") + "…";
-      const label = chalk.gray(` […${pasteLen} 字符 …] `);
-      const displayText = prefix + label + suffix;
-
-      // 对 displayText 折行（ANSI 感知），只取第一行
-      const wrapLines = [];
-      let line = "", lineW = 0, inEsc = false;
-      for (const ch of displayText) {
-        if (ch === "\x1b") { inEsc = true; line += ch; continue; }
-        if (inEsc) {
-          line += ch;
-          if (ch.charCodeAt(0) >= 0x40 && ch.charCodeAt(0) <= 0x7E) inEsc = false;
-          continue;
-        }
-        const cw = charWidth(ch);
-        if (lineW + cw > tw && line.length > 0) { wrapLines.push(line); line = ""; lineW = 0; }
-        line += ch; lineW += cw;
-      }
-      wrapLines.push(line);
-
-      const visible = wrapLines[0];
-
-      // 计算光标在折叠视图中的视觉列位置
-      const prefixVW = visualWidthOfText(prefix);
-      const labelVW = visualWidthOfText(label);
-      let cursorCol = PW; // PROMPT 宽度
-      if (cursor < prePasteStart) {
-        // 光标在 prefix 区域，计算精确列位置
-        const preChars = [...prePaste];
-        if (preChars.length > 30) {
-          const cutoff = preChars.length - 30;
-          if (cursor >= cutoff) {
-            // 光标在可见 prefix 内（最后 30 个码点）
-            const visibleIdx = cursor - cutoff;
-            const visiblePrefix = prefix; // "…" + last 30 chars
-            const preCharsVisible = [...visiblePrefix];
-            let w = 0;
-            for (let i = 0; i < Math.min(visibleIdx + 1, preCharsVisible.length); i++) {
-              w += charWidth(preCharsVisible[i]);
-            }
-            cursorCol += w;
-          } else {
-            // 光标在截断部分，放在 "…" 位置
-            cursorCol += charWidth("…");
-          }
-        } else {
-          // 完整 prefix 可见
-          cursorCol += visualWidthOfText([...prePaste].slice(0, cursor).join(""));
-        }
-      } else if (cursor < lastEnd) {
-        cursorCol += prefixVW; // 光标在粘贴块内，放在 prefix 末尾
-      } else {
-        // 光标在 suffix 区域，计算精确位置
-        const suffixOffset = cursor - lastEnd;
-        const postChars = [...postPaste];
-        if (postChars.length > 30 && suffixOffset >= 30) {
-          cursorCol += prefixVW + labelVW + visualWidthOfText(suffix);
-        } else {
-          cursorCol += prefixVW + labelVW + visualWidthOfText(postChars.slice(0, suffixOffset).join(""));
-        }
-      }
-
-      // 渲染 1 行折叠视图
-      process.stdout.write("\r\x1b[K" + PROMPT + visible + "\n");
-      process.stdout.write(`\x1b[${foldVis}A`);
-      // 将终端光标移到正确列（ANSI 列号 1-based）
-      process.stdout.write(`\x1b[${cursorCol + 1}G`);
-      cursorRelLine = 0;
-      cursorRelCol = cursorCol;
-    } else {
-      // 正常模式：按视觉宽度折行
+    // 正常模式：按视觉宽度折行
+    {
       const { wrapLines, cursorLine, charCount } = getLineInfo();
 
       // 自动调整 scrollOffset 使光标可见
@@ -358,61 +275,58 @@ export async function agentTui(context) {
   drawFooter();
 
   // ═══════════════════════════════════════════════
-  //  Burst 检测 + pasteChunks
+  //  粘贴标记存储
   // ═══════════════════════════════════════════════
 
   let lastDataTime = 0;
-  let burstMode = false;
-  const pasteChunks = []; // [{start, end}] — 原子删除单元
 
-  function resetPasteMode() {
-    burstMode = false;
-    pasteChunks.length = 0;
-    inFoldView = false;
-    scrollOffset = 0;
-  }
+  // 粘贴存储：键值对 { id: 内容 }，标记 [paste:id] 代替全量文本
+  const pasteStore = {};
+  let nextPasteId = 1;
 
-  function adjustChunksAfterDelete(pos, len) {
-    for (const c of pasteChunks) {
-      if (c.start >= pos) { c.start -= len; c.end -= len; }
-      else if (c.end > pos) { c.end -= len; }
-    }
-  }
-
-  function deleteChunkAt(pos) {
-    const idx = pasteChunks.findIndex(c => c.end === pos);
-    if (idx === -1) return false;
-    const c = pasteChunks[idx];
+  /** 在当前位置插入粘贴标记 */
+  function insertPasteMarker(text) {
+    const id = nextPasteId++;
+    pasteStore[id] = text;
+    const marker = `[paste:${id}]`;
     const arr = Array.from(currentInput);
-    arr.splice(c.start, c.end - c.start);
+    arr.splice(cursor, 0, ...marker);
     currentInput = arr.join("");
-    cursor = c.start;
-    const removed = c.end - c.start;
-    pasteChunks.splice(idx, 1);
-    adjustChunksAfterDelete(c.start, removed);
-    return true;
+    cursor += marker.length;
+  }
+
+  /** 找出 cursor 所在标记（如有），返回 { id, start, end } 或 null */
+  function markerAt(pos) {
+    const re = /\[paste:(\d+)\]/g;
+    let m;
+    while ((m = re.exec(currentInput)) !== null) {
+      const start = m.index, end = m.index + m[0].length;
+      if (pos > start && pos <= end) return { id: +m[1], start, end };
+    }
+    return null;
+  }
+
+  /** 展开所有标记，用于发送 */
+  function expandMarkers(s) {
+    return s.replace(/\[paste:(\d+)\]/g, (_, id) => pasteStore[id] || `[paste:${id}]`);
   }
 
   // ── 按键处理 ──
   const onData = (buf) => {
     const now = Date.now();
     const str = buf.toString();
-    const isBatch = buf.length > 20; // 粘贴检测：终端的 raw mode 单次 read 不会超过 ~9 字节的打字
 
-    // Burst 检测：多字节事件必定是粘贴，单字节慢速则退出 burst（但保留 chunks）
-    if (isBatch) {
-      burstMode = true;
-      pasteChunks.push({ start: cursor, end: cursor + [...str].length });
-    } else if (now - lastDataTime > 300) {
-      burstMode = false;
+    // 粘贴检测：终端的 raw mode 单次 read 不会超过 ~9 字节的打字
+    if (buf.length > 20) {
+      insertPasteMarker(str);
+      redrawPrompt();
+      lastDataTime = now;
+      return; // 粘贴作为原子标记插入，跳过逐字循环
     }
     lastDataTime = now;
 
     for (const ch of str) {
       const code = ch.charCodeAt(0);
-
-      // 粘贴中跳过控制字符（退格、ESC 等），防止破坏输入状态
-      if (isBatch && code < 32 && code !== 10) continue;
 
       // Ctrl+C
       if (code === 3) {
@@ -438,15 +352,19 @@ export async function agentTui(context) {
         return;
       }
 
-      // Enter：直接发送（不再被 burst 阻塞）
+      // Enter：展开标记后发送
       if (code === 13) {
         clearFooter();
-        const input = currentInput.trim();
-        resetPasteMode();
+        const raw = currentInput.trim();
+        const input = expandMarkers(raw);
+        // 清理粘贴存储
+        for (const k of Object.keys(pasteStore)) delete pasteStore[k];
+        nextPasteId = 1;
         currentInput = ""; cursor = 0;
         process.stdout.write("\r\x1b[J\n");
         if (input) {
-          inputHistory.push(input); histIdx = -1;
+          // 历史存原始文本（含标记），导航时标记作为普通文本显示
+          inputHistory.push(raw); histIdx = -1;
           handleInput(input);
         } else {
           drawFooter();
@@ -454,9 +372,10 @@ export async function agentTui(context) {
         return;
       }
 
-      // Ctrl+U/K：删除时退出 burst
+      // Ctrl+U/K：清空输入
       if (code === 21 || code === 11) {
-        burstMode = false; pasteChunks.length = 0;
+        for (const k of Object.keys(pasteStore)) delete pasteStore[k];
+        nextPasteId = 1;
       }
 
       // Escape
@@ -466,30 +385,16 @@ export async function agentTui(context) {
       if (escState === 2) {
         escState = 0;
         if (ch === "A") {
-          // ↑ 键
-          if (inFoldView) {
-            // 折叠视图：逐字左移（没有"上/下行"概念）
-            if (cursor > 0) cursor--;
-            else if (histIdx < inputHistory.length - 1) {
-              resetPasteMode();
-              histIdx++; currentInput = inputHistory[inputHistory.length - 1 - histIdx];
-              cursor = currentInput.length; scrollOffset = 0;
-            }
-            redrawPrompt();
-            continue;
-          }
-
-          // 正常多行视图：三级逻辑 — 1) 滚视口  2) 移光标  3) 历史
+          // ↑ 键：三级逻辑 — 1) 滚视口  2) 移光标  3) 历史
           const { wrapLines, cursorLine, charCount } = getLineInfo();
           const total = wrapLines.length;
-          const visLine = cursorLine - scrollOffset; // 光标在可视区的行号 (0-based)
+          const visLine = cursorLine - scrollOffset;
           const scrollable = total > maxVisible;
-          const isHandleRow = scrollable && visLine === 2; // 光标在第 3 行 → 滚视口
+          const isHandleRow = scrollable && visLine === 2;
 
           if (isHandleRow && scrollOffset > 0) {
             scrollOffset--;
           } else if (cursorLine > 0) {
-            // 光标上移一行，保持列偏移
             const colInLine = cursor - charCount;
             const prevLine = wrapLines[cursorLine - 1];
             const prevLen = Array.from(prevLine).length;
@@ -499,7 +404,8 @@ export async function agentTui(context) {
           } else if (scrollOffset > 0) {
             scrollOffset--;
           } else if (inputHistory.length > 0 && histIdx < inputHistory.length - 1) {
-            resetPasteMode();
+            for (const k of Object.keys(pasteStore)) delete pasteStore[k];
+            nextPasteId = 1;
             histIdx++;
             currentInput = inputHistory[inputHistory.length - 1 - histIdx];
             cursor = currentInput.length; scrollOffset = 0;
@@ -509,22 +415,6 @@ export async function agentTui(context) {
         }
         if (ch === "B") {
           // ↓ 键
-          if (inFoldView) {
-            // 折叠视图：逐字右移
-            if (cursor < currentInput.length) cursor++;
-            else if (histIdx > 0) {
-              resetPasteMode();
-              histIdx--; currentInput = inputHistory[inputHistory.length - 1 - histIdx];
-              cursor = currentInput.length; scrollOffset = 0;
-            } else if (histIdx === 0) {
-              resetPasteMode();
-              histIdx = -1; currentInput = ""; cursor = 0; scrollOffset = 0;
-            }
-            redrawPrompt();
-            continue;
-          }
-
-          // 正常多行视图：三级逻辑 — 1) 滚视口  2) 移光标  3) 历史
           const { wrapLines: wl, cursorLine: cl, charCount: cc } = getLineInfo();
           const total = wl.length;
           const visLine = cl - scrollOffset;
@@ -535,7 +425,6 @@ export async function agentTui(context) {
           if (isHandleRow && scrollOffset < maxOff) {
             scrollOffset++;
           } else if (cl < total - 1) {
-            // 光标下移一行，保持列偏移
             const colInLine = cursor - cc;
             const nextLine = wl[cl + 1];
             const nextLen = Array.from(nextLine).length;
@@ -545,49 +434,59 @@ export async function agentTui(context) {
           } else if (scrollOffset < maxOff) {
             scrollOffset++;
           } else if (histIdx > 0) {
-            resetPasteMode();
+            for (const k of Object.keys(pasteStore)) delete pasteStore[k];
+            nextPasteId = 1;
             histIdx--; currentInput = inputHistory[inputHistory.length - 1 - histIdx];
             cursor = currentInput.length; scrollOffset = 0;
           } else if (histIdx === 0) {
-            resetPasteMode();
+            for (const k of Object.keys(pasteStore)) delete pasteStore[k];
+            nextPasteId = 1;
             histIdx = -1; currentInput = ""; cursor = 0; scrollOffset = 0;
           }
           redrawPrompt();
           continue;
         }
-        if (ch === "D") { if (cursor > 0) cursor--; redrawPrompt(); continue; }
-        if (ch === "C") { if (cursor < currentInput.length) cursor++; redrawPrompt(); continue; }
+        // ←→：跳过标记
+        if (ch === "D") {
+          if (cursor > 0) {
+            const m = markerAt(cursor);
+            cursor--;
+            if (m && cursor === m.start) cursor = m.end; // 从标记内跳到标记尾
+          }
+          redrawPrompt(); continue;
+        }
+        if (ch === "C") {
+          if (cursor < currentInput.length) {
+            const m = markerAt(cursor + 1);
+            if (m && cursor === m.start) cursor = m.end;
+            else cursor++;
+          }
+          redrawPrompt(); continue;
+        }
         if (ch === "H") { cursor = 0; redrawPrompt(); continue; }
         if (ch === "F") { cursor = currentInput.length; redrawPrompt(); continue; }
         continue;
       }
       escState = 0;
 
-      // Backspace：光标在 chunk 末尾 → 整块删除；否则按字符删除
+      // Backspace：标记内 → 整块删除；否则单字符删除
       if (code === 127) {
         if (cursor > 0) {
-          if (pasteChunks.length > 0) {
-            const last = pasteChunks.at(-1);
-            if (cursor === last.end) {
-              // 光标刚好在最后一块粘贴的末尾 → 弹出整块
-              pasteChunks.pop();
-              const arr = Array.from(currentInput);
-              arr.splice(last.start, last.end - last.start);
-              currentInput = arr.join("");
-              cursor = last.start;
-              adjustChunksAfterDelete(last.start, last.end - last.start);
-              if (pasteChunks.length === 0) resetPasteMode();
-              redrawPrompt();
-              continue;
-            }
+          const m = markerAt(cursor);
+          if (m) {
+            // 删除整个标记
+            const arr = Array.from(currentInput);
+            arr.splice(m.start, m.end - m.start);
+            currentInput = arr.join("");
+            cursor = m.start;
+            delete pasteStore[m.id];
+            redrawPrompt();
+            continue;
           }
-          if (deleteChunkAt(cursor)) {
-            redrawPrompt(); continue;
-          }
+          // 普通单字删除
           const arr = Array.from(currentInput);
           arr.splice(cursor - 1, 1);
           currentInput = arr.join(""); cursor--;
-          adjustChunksAfterDelete(cursor, 1);
           redrawPrompt();
         }
         continue;
@@ -610,14 +509,11 @@ export async function agentTui(context) {
       // Tab
       if (code === 9) continue;
 
-      // \n：burst → 空格
+      // \n：普通换行（不再区分 burst）
       if (code === 10) {
-        if (burstMode) {
-          const arr = Array.from(currentInput); arr.splice(cursor, 0, " ");
-          currentInput = arr.join(""); cursor++;
-          adjustChunksAfterDelete(cursor - 1, -1);
-        }
-        if (!burstMode) redrawPrompt();
+        const arr = Array.from(currentInput); arr.splice(cursor, 0, " ");
+        currentInput = arr.join(""); cursor++;
+        redrawPrompt();
         continue;
       }
 
@@ -625,23 +521,9 @@ export async function agentTui(context) {
       if (code >= 32) {
         const arr = Array.from(currentInput); arr.splice(cursor, 0, ch);
         currentInput = arr.join(""); cursor++;
-        // 粘贴批次内不在单个字符上重绘（批次结束统一重绘）
-        // 独立输入立即重绘
-        if (!isBatch) {
-          redrawPrompt();
-        }
+        redrawPrompt();
         continue;
       }
-    }
-
-    // 粘贴批次结束：统一重绘一次
-    if (isBatch) {
-      // 检测是否刚触发了折叠视图（避免设置错误的 scrollOffset）
-      const willFold = pasteChunks.length > 0 && currentInput.length > 300;
-      if (!willFold) {
-        scrollOffset = Math.max(0, totalInputLines() - visibleInputLines());
-      }
-      redrawPrompt();
     }
   };
 
