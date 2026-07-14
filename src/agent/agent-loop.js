@@ -1,7 +1,8 @@
 import {
   parseToolCallsFromText, buildPromptFromMessages,
-  consumeQwenStream, streamDeltasWithMessageId
+  consumeQwenStream
 } from "../bridge.js";
+import { streamDeltasWithMessageId } from "../providers/deepseek/chat.js";
 import { executeToolCall, TOOL_DEFINITIONS } from "./tools/registry.js";
 import { buildMainSystemPrompt } from "./prompts/main-system.js";
 import { buildAuxSystemPrompt } from "./prompts/aux-system.js";
