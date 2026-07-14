@@ -1,8 +1,7 @@
 import {
   parseToolCallsFromText, buildPromptFromMessages,
-  consumeQwenStream
+  consumeQwenStream, streamDeltasWithMessageId
 } from "../bridge.js";
-import { streamDeltasWithMessageId } from "../providers/deepseek/chat.js";
 import { executeToolCall, TOOL_DEFINITIONS } from "./tools/registry.js";
 import { buildMainSystemPrompt } from "./prompts/main-system.js";
 import { buildAuxSystemPrompt } from "./prompts/aux-system.js";
@@ -21,25 +20,25 @@ function formatToolResultCompact(toolName, result) {
     case "file-read": {
       if (!result.success) return `读取失败: ${result.error}`;
       const content = (result.content || "").slice(0, 3000);
-      return `(行 ${result.offset || 0}-${(result.offset || 0) + (result.lines || 0)} / 共 ${result.totalLines || "?"} 行)\n${content}`;
+      return `FILE-READ: ${result.path}\n${content}`;
     }
     case "file-write": {
       return result.success
-        ? `已写入: ${result.path}\n${result.message || ""}`
+        ? `FILE-WRITE: ${result.path}\n${result.message || ""}`
         : `写入失败: ${result.error}`;
     }
     case "file-search": {
       if (result.error) return `搜索失败: ${result.error}`;
       if (result.type === "filename") {
         const files = (result.files || []).slice(0, 20).join("\n");
-        return `找到 ${result.count} 个文件:\n${files}`;
+        return `SEARCH: ${result.pattern}\n找到 ${result.count} 个文件:\n${files}`;
       }
       if (result.type === "content") {
         const lines = (result.matches || []).slice(0, 20)
           .map((m) => `${m.file}:${m.line}  ${m.text}`).join("\n");
-        return `找到 ${result.count} 处匹配:\n${lines}`;
+        return `SEARCH: ${result.pattern}\n找到 ${result.count} 处匹配:\n${lines}`;
       }
-      return `找到 ${result.count || 0} 个结果`;
+      return `SEARCH: ${result.pattern}\n找到 ${result.count || 0} 个结果`;
     }
     case "todo": {
       if (result.action === "list") {
@@ -48,7 +47,7 @@ function formatToolResultCompact(toolName, result) {
       }
       if (result.action === "update") {
         const items = (result.tasks || []).map((t) => `[${t.status}] ${t.content}`).join("\n");
-        return `${result.message || "任务清单:"}\n${items}`;
+        return `TODO: ${result.message || "任务清单"}\n${items}`;
       }
       return JSON.stringify(result).slice(0, 500);
     }
@@ -104,18 +103,39 @@ function stripToolXml(text) {
     .trim();
 }
 
-// ── 流消费（带 messageId 捕获，用于 Agent 循环）──
+// ── 续聊 prompt 构建 ──
 
 /**
- * 消费 provider 响应流，yield { type, text } 事件。
- * DeepSeek：同时捕获 response_message_id 用于续聊。
- * Qwen：直接消费 SSE 流。
- *
- * 返回 { deltas, messageId }，messageId 在流消费完后可用。
+ * 构建续聊 prompt：思考内容 + 本轮所有工具结果。
+ * 发送前剥离思考中的工具调用预演（避免 AI 混淆）。
  */
+function buildContinuationPrompt(thinking, toolResults) {
+  const parts = [];
+
+  // 附上思考内容（剥离工具调用预演）
+  if (thinking && thinking.trim()) {
+    const cleanThinking = stripToolXml(thinking).trim();
+    if (cleanThinking) {
+      parts.push(`以下是上一轮的思考内容：\n\n<think>\n${cleanThinking}\n</think>`);
+    }
+  }
+
+  // 所有工具结果
+  if (toolResults.length > 0) {
+    // parts.push("工具执行结果：\n");
+    for (const r of toolResults) {
+      parts.push(r);
+      parts.push("");
+    }
+  }
+
+  return parts.join("\n").trim();
+}
+
+// ── 流消费者（分离 thinking / response，捕获 messageId）──
+
 function createAgentStreamConsumer(provider, resp) {
   if (provider.name === "qwen") {
-    // Qwen：收集所有 deltas 后一次性 yield
     return {
       async *deltas() {
         const pending = [];
@@ -128,7 +148,6 @@ function createAgentStreamConsumer(provider, resp) {
     };
   }
 
-  // DeepSeek：流式消费 + 捕获 messageId
   const stream = streamDeltasWithMessageId(resp);
   return {
     async *deltas() {
@@ -141,13 +160,9 @@ function createAgentStreamConsumer(provider, resp) {
 }
 
 // ═══════════════════════════════════════════════
-//  Agent 循环（含 Session 复用）
+//  Agent 循环（Session 复用 + 思考保留 + 多工具结果）
 // ═══════════════════════════════════════════════
 
-/**
- * 启动 Agent 循环
- * 首轮创建会话发送完整 prompt；后续轮复用同一个会话仅发送工具结果。
- */
 export async function* runAgentLoop(userInput, context) {
   const {
     mainProvider, composite, workingDir,
@@ -157,8 +172,8 @@ export async function* runAgentLoop(userInput, context) {
   appendMessage(composite, { role: "user", content: userInput, source: "user" });
 
   let iteration = 0;
-  let sessionId = null;       // DeepSeek session / Qwen chatId
-  let parentMessageId = null; // DeepSeek response_message_id（续聊用）
+  let sessionId = null;
+  let parentMessageId = null;
 
   while (iteration < maxIterations) {
     if (signal?.aborted) {
@@ -168,14 +183,18 @@ export async function* runAgentLoop(userInput, context) {
 
     iteration++;
 
-    // 构建消息列表
     const messages = buildMessagesForMain(composite, workingDir);
 
-    // 首轮：完整 prompt；续聊：仅发送最后一条消息（工具结果）
+    // 首轮：完整 prompt；续聊：思考 + 所有工具结果
     let prompt;
     if (sessionId) {
-      const lastMsg = messages[messages.length - 1];
-      prompt = lastMsg?.content || "";
+      // 续聊：收集本轮新消息（思考 + 工具结果）构建续聊 prompt
+      const newMsgs = composite.messages.slice(composite._turnStartIdx || 0);
+      const thinking = newMsgs.find((m) => m.role === "assistant")?.thinking || "";
+      const toolResults = newMsgs
+        .filter((m) => m.role === "tool")
+        .map((m) => m.content || "");
+      prompt = buildContinuationPrompt(thinking, toolResults);
     } else {
       prompt = buildPromptFromMessages(messages);
     }
@@ -198,31 +217,45 @@ export async function* runAgentLoop(userInput, context) {
         return;
       }
 
-      // 首轮保存 sessionId
       if (!sessionId && resp._sessionId) {
         sessionId = resp._sessionId;
       }
 
-      // 流式消费 + 捕获 messageId
+      // ── 流式消费：分离 thinking / response ──
       const consumer = createAgentStreamConsumer(mainProvider, resp);
-      let fullText = "";
+      let thinkingText = "";
+      let responseText = "";
 
       for await (const event of consumer.deltas()) {
-        fullText += event.text || "";
-        yield event; // { type: "thinking"|"response", text }
+        if (event.type === "thinking") {
+          thinkingText += event.text;
+        } else {
+          responseText += event.text;
+        }
+        yield event; // 渲染给 UI
       }
 
-      // DeepSeek：保存 messageId 供下次续聊
       if (consumer.messageId) {
         parentMessageId = consumer.messageId;
       }
 
-      // 解析工具调用
-      const parsedCalls = parseToolCallsFromText(fullText);
+      // ── 只从 response 中解析工具调用（thinking 中的预演不算）──
+      const parsedCalls = parseToolCallsFromText(responseText);
 
       if (parsedCalls.length > 0) {
-        // 保存 AI 完整响应
-        appendMessage(composite, { role: "assistant", content: fullText, source: "main" });
+        // 标记本轮起始位置（续聊时从这里取消息）
+        composite._turnStartIdx = composite.messages.length;
+
+        // 保存 AI 响应（含思考，后续续聊会用到）
+        appendMessage(composite, {
+          role: "assistant",
+          content: responseText,
+          thinking: thinkingText,   // 保留思考供续聊使用
+          source: "main"
+        });
+
+        // 执行所有工具，收集结果
+        const toolResultTexts = [];
 
         for (const call of parsedCalls) {
           if (signal?.aborted) {
@@ -259,6 +292,8 @@ export async function* runAgentLoop(userInput, context) {
           }
 
           const resultText = formatToolResultCompact(toolName, toolResult.result);
+          toolResultTexts.push(resultText);
+
           appendMessage(composite, {
             role: "tool",
             content: resultText,
@@ -274,14 +309,18 @@ export async function* runAgentLoop(userInput, context) {
           }
         }
 
-        // 继续循环让 AI 处理工具结果
         continue;
       }
 
       // 无工具调用 → 最终响应
-      const cleanText = stripToolXml(fullText);
+      const cleanText = stripToolXml(responseText);
       if (cleanText.trim()) {
-        appendMessage(composite, { role: "assistant", content: cleanText, source: "main" });
+        appendMessage(composite, {
+          role: "assistant",
+          content: cleanText,
+          thinking: thinkingText,
+          source: "main"
+        });
       }
       yield { type: "done", text: cleanText };
       return;
@@ -295,11 +334,8 @@ export async function* runAgentLoop(userInput, context) {
   yield { type: "error", text: `达到最大迭代次数 (${maxIterations})，请简化任务` };
 }
 
-// ── 辅助 AI 调用（单轮，不复用 session）──
+// ── 辅助 AI 调用 ──
 
-/**
- * 辅助 AI 调用
- */
 export async function* runAuxCall(userInput, context) {
   const { auxProvider, composite, workingDir } = context;
 

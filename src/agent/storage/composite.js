@@ -73,7 +73,8 @@ export function appendMessage(composite, message) {
     id: createId(),
     role: message.role || "assistant",
     content: message.content || "",
-    source: message.source || "main",    // "main" | "aux" | "user" | "tool"
+    thinking: message.thinking || "",          // 思考内容（续聊时回传给 AI）
+    source: message.source || "main",
     toolName: message.toolName || null,
     toolResult: message.toolResult || null,
     timestamp: new Date().toISOString()
