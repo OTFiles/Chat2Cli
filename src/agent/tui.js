@@ -164,8 +164,9 @@ export async function agentTui(context) {
   }
 
   function clearFooter() {
-    // 以当前 footer 高度 + 1 行刷新到屏底
-    process.stdout.write(`\x1b[${footerVis + 2}E\x1b[J\r`);
+    // 以当前 footer 高度 + 1 行删到当前下两行
+    process.stdout.write(`\x1b[${footerVis + 1}A`);
+    process.stdout.write(`\x1b[${footerVis + 3}M`);
   }
 
   function redrawPrompt() {
