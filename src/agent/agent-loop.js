@@ -1,23 +1,22 @@
-import { parseToolCallsFromText, buildPromptFromMessages, consumeQwenStream, consumeRawStream } from "../bridge.js";
+import {
+  parseToolCallsFromText, buildPromptFromMessages,
+  consumeQwenStream
+} from "../bridge.js";
+import { streamDeltasWithMessageId } from "../providers/deepseek/chat.js";
 import { executeToolCall, TOOL_DEFINITIONS } from "./tools/registry.js";
 import { buildMainSystemPrompt } from "./prompts/main-system.js";
 import { buildAuxSystemPrompt } from "./prompts/aux-system.js";
 import { appendMessage, updateTaskList } from "./storage/composite.js";
 
-// ── 工具结果紧凑格式化 ──
+// ── 工具结果紧凑格式化（发送给 AI）──
 
-/** 将工具结果转为人类可读的紧凑文本，替代完整 JSON */
 function formatToolResultCompact(toolName, result) {
   if (!result) return "";
 
   switch (toolName) {
     case "shell": {
-      const parts = [`命令: ${result.command || ""}`];
-      if (result.exitCode !== undefined) parts.push(`退出: ${result.exitCode}`);
-      if (result.stderr) parts.push(`stderr:\n${result.stderr.slice(-1000)}`);
-      else if (result.stdout) parts.push(`stdout:\n${result.stdout.slice(-3000)}`);
-      else if (result.error) parts.push(`错误: ${result.error}`);
-      return parts.join("\n");
+      const out = result.stderr || result.stdout || (result.error ? `错误: ${result.error}` : "(无输出)");
+      return `SHELL: ${result.command || ""}\n${out.slice(0, 4000)}`;
     }
     case "file-read": {
       if (!result.success) return `读取失败: ${result.error}`;
@@ -69,7 +68,6 @@ function buildMessagesForMain(composite, workingDir) {
 
   const messages = [{ role: "system", content: systemPrompt }];
 
-  // 添加最近的对话历史（限制长度，避免超 context）
   const recentMessages = (composite.messages || []).slice(-40);
   for (const msg of recentMessages) {
     if (msg.role === "tool") {
@@ -98,7 +96,6 @@ function buildMessagesForAux(composite, workingDir, task) {
   ];
 }
 
-/** 去除文本中的工具调用 XML，保留纯文本 */
 function stripToolXml(text) {
   if (!text) return "";
   return text
@@ -107,48 +104,61 @@ function stripToolXml(text) {
     .trim();
 }
 
-// ── 流消费 ──
+// ── 流消费（带 messageId 捕获，用于 Agent 循环）──
 
-async function* yieldStreamResponse(provider, resp) {
+/**
+ * 消费 provider 响应流，yield { type, text } 事件。
+ * DeepSeek：同时捕获 response_message_id 用于续聊。
+ * Qwen：直接消费 SSE 流。
+ *
+ * 返回 { deltas, messageId }，messageId 在流消费完后可用。
+ */
+function createAgentStreamConsumer(provider, resp) {
   if (provider.name === "qwen") {
-    const pending = [];
-    await consumeQwenStream(resp.body, (delta) => {
-      pending.push(delta);
-    });
-    for (const d of pending) yield d;
-  } else {
-    for await (const delta of consumeRawStream(resp.body)) {
-      yield delta;
-    }
+    // Qwen：收集所有 deltas 后一次性 yield
+    return {
+      async *deltas() {
+        const pending = [];
+        await consumeQwenStream(resp.body, (delta) => {
+          pending.push({ type: delta.kind, text: delta.text });
+        });
+        for (const d of pending) yield d;
+      },
+      get messageId() { return null; }
+    };
   }
+
+  // DeepSeek：流式消费 + 捕获 messageId
+  const stream = streamDeltasWithMessageId(resp);
+  return {
+    async *deltas() {
+      for await (const delta of stream.deltas) {
+        yield { type: delta.kind, text: delta.text };
+      }
+    },
+    get messageId() { return stream.messageId; }
+  };
 }
 
 // ═══════════════════════════════════════════════
-//  Agent 循环
+//  Agent 循环（含 Session 复用）
 // ═══════════════════════════════════════════════
 
 /**
  * 启动 Agent 循环
- * @param {string} userInput - 用户输入
- * @param {object} context
- * @param {object} context.mainProvider - 主 AI provider
- * @param {object} context.auxProvider - 辅助 AI provider
- * @param {object} context.composite - 复合对话对象
- * @param {string} context.workingDir
- * @param {number} [context.maxIterations=15]
- * @param {AbortSignal} [context.signal]
- * @returns {AsyncGenerator<{type, text?, toolName?, toolResult?, requiresApproval?, source?}>}
+ * 首轮创建会话发送完整 prompt；后续轮复用同一个会话仅发送工具结果。
  */
 export async function* runAgentLoop(userInput, context) {
   const {
-    mainProvider, auxProvider, composite, workingDir,
+    mainProvider, composite, workingDir,
     maxIterations = 15, signal
   } = context;
 
-  // 添加用户消息
   appendMessage(composite, { role: "user", content: userInput, source: "user" });
 
   let iteration = 0;
+  let sessionId = null;       // DeepSeek session / Qwen chatId
+  let parentMessageId = null; // DeepSeek response_message_id（续聊用）
 
   while (iteration < maxIterations) {
     if (signal?.aborted) {
@@ -158,30 +168,56 @@ export async function* runAgentLoop(userInput, context) {
 
     iteration++;
 
+    // 构建消息列表
     const messages = buildMessagesForMain(composite, workingDir);
-    const prompt = buildPromptFromMessages(messages);
+
+    // 首轮：完整 prompt；续聊：仅发送最后一条消息（工具结果）
+    let prompt;
+    if (sessionId) {
+      const lastMsg = messages[messages.length - 1];
+      prompt = lastMsg?.content || "";
+    } else {
+      prompt = buildPromptFromMessages(messages);
+    }
+
+    const providerOpts = {
+      prompt,
+      model: context.mainModel || undefined,
+      accountId: composite.main.accountId,
+    };
+    if (sessionId) {
+      providerOpts.sessionId = sessionId;
+      providerOpts.parentMessageId = parentMessageId;
+    }
 
     try {
-      const resp = await mainProvider.startCompletion(messages, {
-        prompt,
-        model: context.mainModel || undefined,
-        accountId: composite.main.accountId
-      });
+      const resp = await mainProvider.startCompletion(messages, providerOpts);
 
       if (!resp || !resp.ok) {
         yield { type: "error", text: `${mainProvider.label} 请求失败 (HTTP ${resp?.status || "?"})` };
         return;
       }
 
-      // 流式输出 + 收集完整文本
+      // 首轮保存 sessionId
+      if (!sessionId && resp._sessionId) {
+        sessionId = resp._sessionId;
+      }
+
+      // 流式消费 + 捕获 messageId
+      const consumer = createAgentStreamConsumer(mainProvider, resp);
       let fullText = "";
-      for await (const delta of yieldStreamResponse(mainProvider, resp)) {
-        fullText += delta.text || "";
-        yield delta; // { kind: "thinking"|"response", text }
+
+      for await (const event of consumer.deltas()) {
+        fullText += event.text || "";
+        yield event; // { type: "thinking"|"response", text }
+      }
+
+      // DeepSeek：保存 messageId 供下次续聊
+      if (consumer.messageId) {
+        parentMessageId = consumer.messageId;
       }
 
       // 解析工具调用
-      const toolNames = [];
       const parsedCalls = parseToolCallsFromText(fullText);
 
       if (parsedCalls.length > 0) {
@@ -195,7 +231,6 @@ export async function* runAgentLoop(userInput, context) {
           }
 
           const toolName = call.name;
-          toolNames.push(toolName);
 
           let params = {};
           try {
@@ -220,7 +255,6 @@ export async function* runAgentLoop(userInput, context) {
               requiresApproval: true,
               toolResult: toolResult.result
             };
-            // 不执行，等待外部审批
             continue;
           }
 
@@ -235,7 +269,6 @@ export async function* runAgentLoop(userInput, context) {
 
           yield { type: "tool_result", toolName, toolResult: toolResult.result, text: resultText };
 
-          // todo 工具的特殊处理
           if (toolName === "todo" && toolResult.result?.action === "update") {
             updateTaskList(composite, toolResult.result.tasks);
           }
@@ -262,6 +295,8 @@ export async function* runAgentLoop(userInput, context) {
   yield { type: "error", text: `达到最大迭代次数 (${maxIterations})，请简化任务` };
 }
 
+// ── 辅助 AI 调用（单轮，不复用 session）──
+
 /**
  * 辅助 AI 调用
  */
@@ -285,10 +320,12 @@ export async function* runAuxCall(userInput, context) {
       return;
     }
 
+    const consumer = createAgentStreamConsumer(auxProvider, resp);
     let fullText = "";
-    for await (const delta of yieldStreamResponse(auxProvider, resp)) {
-      fullText += delta.text || "";
-      yield { ...delta, source: "aux" };
+
+    for await (const event of consumer.deltas()) {
+      fullText += event.text || "";
+      yield { ...event, source: "aux" };
     }
 
     appendMessage(composite, { role: "assistant", content: fullText, source: "aux" });

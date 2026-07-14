@@ -40,6 +40,8 @@ export async function agentTui(context) {
 
   // 中断控制
   let abortController = null;
+  // 工作状态（Agent 执行中禁止输入）
+  let agentWorking = false;
 
   function charWidth(c) {
     return (c.charCodeAt(0) > 127) ? 2 : 1;
@@ -167,6 +169,16 @@ export async function agentTui(context) {
     // 以当前 footer 高度 + 1 行删到当前下两行
     process.stdout.write(`\x1b[${footerVis + 1}A`);
     process.stdout.write(`\x1b[${footerVis + 3}M`);
+  }
+
+  /** Agent 工作中状态：灰色背景提示条 */
+  function showWorkingStatus() {
+    clearFooter();
+    const W = termWidth();
+    process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+    process.stdout.write("   " + chalk.bgGray.black(" Agent工作中... ") + "\n");
+    process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+    process.stdout.write("   " + chalk.dim("按 Ctrl+C 中断") + "\n");
   }
 
   function redrawPrompt() {
@@ -316,6 +328,18 @@ export async function agentTui(context) {
   const onData = (buf) => {
     const now = Date.now();
     const str = buf.toString();
+
+    // ── 工作状态：仅允许 Ctrl+C 中断 ──
+    if (agentWorking) {
+      if (buf.length === 1 && buf[0] === 3) {
+        if (abortController) {
+          abortController.abort();
+          abortController = null;
+          currentInput = ""; cursor = 0; scrollOffset = 0;
+        }
+      }
+      return;
+    }
 
     // 粘贴检测：终端的 raw mode 单次 read 不会超过 ~9 字节的打字
     if (buf.length > 20) {
@@ -567,6 +591,10 @@ export async function agentTui(context) {
     }
     abortController = new AbortController();
 
+    // 进入工作状态：锁定输入，显示状态提示
+    agentWorking = true;
+    showWorkingStatus();
+
     try {
       for await (const event of runAgentLoop(input, {
         ...context,
@@ -578,6 +606,8 @@ export async function agentTui(context) {
       process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
     }
 
+    // 退出工作状态
+    agentWorking = false;
     abortController = null;
     drawFooter();
   }
@@ -639,9 +669,9 @@ export async function agentTui(context) {
         try {
           for await (const event of runAuxCall(auxTask, context)) {
             if (event.source === "aux") {
-              if (event.kind === "thinking") {
+              if (event.type === "thinking") {
                 process.stdout.write(chalk.gray.dim(event.text));
-              } else if (event.kind === "response" || event.type === "done") {
+              } else if (event.type === "response" || event.type === "done") {
                 process.stdout.write("   " + event.text + "\n\n");
               }
             }
@@ -671,57 +701,46 @@ export async function agentTui(context) {
   }
 }
 
-// ── Thinking 状态管理 ──
+// ── Thinking 状态管理（参照 chat.js：简单追加，不用 ANSI 重绘）──
 
 let thinkingBuf = "";
 let thinkingActive = false;
+let thinkingFirstChunk = false;
 
 function resetThinkingState() {
   thinkingBuf = "";
   thinkingActive = false;
-}
-
-/** 重绘最后 N 行 thinking 内容（原地刷新） */
-function redrawThinkingTail(maxLines = 4) {
-  if (!thinkingBuf) return;
-  const lines = thinkingBuf.split("\n");
-  const tail = lines.slice(-maxLines);
-  // 上移以覆盖之前绘制的行
-  process.stdout.write(`\x1b[${Math.max(0, tail.length)}A`);
-  process.stdout.write("\x1b[J"); // 清到屏底
-  for (const l of tail) {
-    process.stdout.write(chalk.gray("   " + l) + "\n");
-  }
-  // 光标回到末尾行下方
-}
-
-/** 清除 thinking 显示 */
-function clearThinkingDisplay() {
-  if (!thinkingActive) return;
-  // 清除最后绘制的 thinking 行
-  const tailCount = Math.min(4, thinkingBuf.split("\n").length);
-  process.stdout.write(`\x1b[${tailCount}A\x1b[J`);
-  thinkingActive = false;
-  thinkingBuf = "";
+  thinkingFirstChunk = false;
 }
 
 // ── 渲染 Agent 事件 ──
 
 function renderAgentEvent(event, mainProvider, auxProvider) {
-  switch (event.type) {
+  switch (event.type || event.kind) {
     case "thinking": {
       if (!thinkingActive) {
         printThinkingLabel();
         thinkingActive = true;
+        thinkingFirstChunk = true;
       }
       thinkingBuf += event.text;
-      redrawThinkingTail(4);
+      // 参照 chat.js：简单逐字追加灰度文本
+      let t = event.text;
+      if (thinkingFirstChunk) {
+        t = "   " + t;       // 首段缩进
+        thinkingFirstChunk = false;
+      }
+      t = t.replace(/\n/g, "\n   ");  // 换行保持缩进
+      process.stdout.write(chalk.gray(t));
       break;
     }
 
     case "response": {
       if (event.source === "aux") return;
-      clearThinkingDisplay();
+      // response 开始时清除 thinking 尾部
+      if (thinkingActive) {
+        thinkingActive = false;
+      }
       renderMarkdown(event.text, true);
       break;
     }
@@ -733,10 +752,9 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
         process.stdout.write("\n   " + chalk.gray("(审批功能开发中，操作将继续运行)\n\n"));
         return;
       }
-      // shell 工具：显示命令
-      if (event.toolName === "shell") {
-        process.stdout.write("\n");
-        // 命令本身不在这里显示，等 tool_result 一起显示
+      // 非 shell 工具给个提示
+      if (event.toolName && event.toolName !== "shell") {
+        process.stdout.write("\n   " + chalk.dim(`🔧 ${event.toolName} ...`) + "\n");
       }
       break;
     }
@@ -753,7 +771,7 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
 
     case "done": {
       if (event.source === "aux") return;
-      clearThinkingDisplay();
+      thinkingActive = false;
       if (event.text?.trim()) {
         renderMarkdown(event.text, true);
       }
@@ -794,34 +812,27 @@ function renderToolResult(toolName, result) {
   }
 }
 
-/** Shell 结果：命令(SHELL 同行) + 结果(后5行) */
+/** Shell 结果：SHELL: cmd + 直接输出结果 */
 function renderShellResult(result) {
-  const success = result.success;
   const cmd = result.command || "";
   const stdout = result.stdout || "";
   const stderr = result.stderr || "";
-
-  // 截取命令显示（同行用）
-  const cmdShort = cmd.replace(/\n/g, " ").slice(0, 120);
-
-  // 结果取最后 5 行
   const output = stderr || stdout || "(无输出)";
-  const outLines = output.split("\n");
-  const tailLines = outLines.slice(-5);
-  const tailDisplay = tailLines.join("\n").slice(0, 500);
 
-  // 状态图标 + SHELL + 命令（同一行）
-  const icon = success ? chalk.green(" ✓ ") : chalk.red(" ✗ ");
-  process.stdout.write("   " + icon + chalk.bold("SHELL") + "  " + chalk.gray.dim("$ ") + chalk.gray.dim(cmdShort));
+  // 标题行: SHELL: command
+  process.stdout.write("\n   " + chalk.bold("SHELL: ") + chalk.white(cmd));
 
-  // 结果另起一行
-  if (tailDisplay) {
-    process.stdout.write("\n   " + chalk.white(tailDisplay.replace(/\n/g, "\n   ")));
+  // 结果逐行输出
+  if (output) {
+    const lines = output.split("\n");
+    for (const line of lines) {
+      process.stdout.write("\n   " + (stderr ? chalk.red(line) : chalk.white(line)));
+    }
   }
   if (result.error && !stderr) {
     process.stdout.write("\n   " + chalk.red(result.error.slice(0, 200)));
   }
-  process.stdout.write("\n\n");
+  process.stdout.write("\n");
 }
 
 /** 文件读取：只显示路径+行范围，不展示内容 */

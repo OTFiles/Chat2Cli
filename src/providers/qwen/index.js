@@ -517,7 +517,7 @@ export class QwenProvider extends BaseProvider {
     }
   }
 
-  // ── Server 桥接 ──
+  // ── Server / Agent 桥接 ──
 
   async startCompletion(messages, options = {}) {
     const account = options.accountId
@@ -529,8 +529,13 @@ export class QwenProvider extends BaseProvider {
     const model = options.model || realModels[0]?.id;
     const prompt = options.prompt || buildPromptFromMessages(messages);
 
-    const chatId = await createChatSession(account.token, model);
+    // 续聊时复用已有 chatId，否则创建新的
+    const chatId = options.sessionId || await createChatSession(account.token, model);
     const payload = buildQwenPayload(chatId, model, prompt, options);
+    // 续聊时设置 parent_id
+    if (options.parentMessageId) {
+      payload.messages[0].parent_id = options.parentMessageId;
+    }
 
     const headers = buildHeaders(account.token);
     headers.Accept = "text/event-stream";  // streaming 请求必须的 Accept
@@ -544,6 +549,8 @@ export class QwenProvider extends BaseProvider {
       }
     );
 
+    // Agent 循环用：附加 sessionId 供后续续聊
+    resp._sessionId = chatId;
     return resp;
   }
 }

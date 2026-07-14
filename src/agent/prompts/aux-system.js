@@ -3,13 +3,26 @@
  * 轻量版，专注执行单个子任务，不做规划
  */
 
+import { platform, release, type } from "node:os";
+
+function detectOS() {
+  const plat = platform();
+  if (plat === "android" || !!process.env.TERMUX_VERSION) {
+    return `Android (Termux, ${release()})`;
+  }
+  if (plat === "linux") return `Linux (${release()})`;
+  if (plat === "darwin") return `macOS (${release()})`;
+  if (plat === "win32") return `Windows (${release()})`;
+  return `${type()} ${release()}`;
+}
+
 export function buildAuxSystemPrompt({ workingDir, toolDefinitions }) {
   const toolSection = buildAuxToolSection(toolDefinitions);
 
   return `你是一个 AI 编程助手的子代理（Sub-agent），负责执行主 AI 分配的单个子任务。
 
 ## 工作环境
-- 操作系统：Android (Termux)
+- 操作系统：${detectOS()}
 - 工作目录：${workingDir}
 
 ## 规则

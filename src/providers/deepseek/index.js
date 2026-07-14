@@ -137,9 +137,11 @@ export class DeepSeekProvider extends BaseProvider {
     }
   }
 
-  /** Server 用
+  /** Server / Agent 用
    *  options.prompt 可覆盖自动构建的 prompt（用于注入工具调用提示）
    *  options.accountId 可指定使用特定 DeepSeek 账号
+   *  options.sessionId 续聊时复用已有会话
+   *  options.parentMessageId 续聊时链接到上一条消息
    */
   async startCompletion(messages, options = {}) {
     const account = options.accountId
@@ -149,10 +151,15 @@ export class DeepSeekProvider extends BaseProvider {
 
     const model = options.model || "deepseek-chat-fast";
     const prompt = options.prompt || buildPromptFromMessages(messages);
-    const sessionId = await createChatSession(account);
+    const sessionId = options.sessionId || await createChatSession(account);
     const body = buildChatCompletionBody({ sessionId, prompt, model });
+    if (options.parentMessageId) {
+      body.parent_message_id = options.parentMessageId;
+    }
 
     const { response } = await startDeepseekCompletion({ account, body });
+    // Agent 循环用：附加 sessionId 供后续续聊
+    response._sessionId = sessionId;
     return response;
   }
 

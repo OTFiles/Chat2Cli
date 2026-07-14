@@ -3,6 +3,19 @@
  * 参考 Claude Code、Cursor、Manus、Devin 的提示词设计模式
  */
 
+import { platform, release, type } from "node:os";
+
+function detectOS() {
+  const plat = platform();
+  if (plat === "android" || !!process.env.TERMUX_VERSION) {
+    return `Android (Termux, ${release()})`;
+  }
+  if (plat === "linux") return `Linux (${release()})`;
+  if (plat === "darwin") return `macOS (${release()})`;
+  if (plat === "win32") return `Windows (${release()})`;
+  return `${type()} ${release()}`;
+}
+
 export function buildMainSystemPrompt({ workingDir, taskList, toolDefinitions }) {
   const toolSection = buildToolSection(toolDefinitions);
   const taskSection = buildTaskSection(taskList);
@@ -10,7 +23,7 @@ export function buildMainSystemPrompt({ workingDir, taskList, toolDefinitions })
   return `你是一个 AI 编程助手（Agent），在终端环境中运行，可以使用工具来完成用户的编程任务。
 
 ## 工作环境
-- 操作系统：Android (Termux)
+- 操作系统：${detectOS()}
 - 工作目录：${workingDir}
 - 当前时间：${new Date().toISOString()}
 
