@@ -114,16 +114,18 @@ function executeShell(params, context) {
   }
 
   const cwd = working_dir || context.workingDir || process.cwd();
-  const timeoutMs = 120000;
+  const timeoutMs = context.shellTimeout;
+  const execOpts = {
+    cwd,
+    maxBuffer: 10 * 1024 * 1024,
+    encoding: "utf8",
+    env: { ...process.env, LANG: "en_US.UTF-8" }
+  };
+  // timeoutMs === 0 表示无超时限制
+  if (timeoutMs && timeoutMs > 0) execOpts.timeout = timeoutMs;
 
   try {
-    const stdout = execSync(command, {
-      cwd,
-      timeout: timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
-      encoding: "utf8",
-      env: { ...process.env, LANG: "en_US.UTF-8" }
-    });
+    const stdout = execSync(command, execOpts);
     return {
       result: {
         success: true,

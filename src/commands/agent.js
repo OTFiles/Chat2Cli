@@ -225,7 +225,9 @@ export async function runAgent(opts = {}) {
     composite,
     mainModel,
     auxModel,
-    workingDir: composite.workingDir || process.cwd()
+    workingDir: composite.workingDir || process.cwd(),
+    shellTimeout: opts.timeout ?? 120000,
+    maxTokens: opts.maxTokens ?? 1000000
   });
 }
 

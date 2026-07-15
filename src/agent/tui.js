@@ -828,6 +828,13 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
       break;
     }
 
+    case "info": {
+      flushResponseLines();
+      flushResponseRemaining();
+      process.stdout.write("\n   " + chalk.cyan("ℹ ") + event.text + "\n\n");
+      break;
+    }
+
     case "done": {
       if (event.source === "aux") return;
       thinkingActive = false;
