@@ -707,10 +707,33 @@ let thinkingBuf = "";
 let thinkingActive = false;
 let thinkingFirstChunk = false;
 
+// ── Response 行缓冲（参照 chat.js：逐完整行渲染 markdown）──
+
+let responseLineBuf = "";
+
+function flushResponseLines() {
+  if (!responseLineBuf) return;
+  const lines = responseLineBuf.split("\n");
+  responseLineBuf = lines.pop() || "";  // 最后不完整行保留
+  for (const line of lines) {
+    const rendered = renderMarkdown(line, true);
+    if (rendered) process.stdout.write(rendered + "\n");
+  }
+}
+
+function flushResponseRemaining() {
+  if (responseLineBuf) {
+    const rendered = renderMarkdown(responseLineBuf, true);
+    if (rendered) process.stdout.write(rendered + "\n");
+    responseLineBuf = "";
+  }
+}
+
 function resetThinkingState() {
   thinkingBuf = "";
   thinkingActive = false;
   thinkingFirstChunk = false;
+  responseLineBuf = "";
 }
 
 // ── 渲染 Agent 事件 ──
@@ -737,15 +760,16 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
 
     case "response": {
       if (event.source === "aux") return;
-      // response 开始时清除 thinking 尾部
-      if (thinkingActive) {
-        thinkingActive = false;
-      }
-      renderMarkdown(event.text, true);
+      thinkingActive = false;
+      // 行缓冲：积累到完整行再渲染（参照 chat.js）
+      responseLineBuf += event.text;
+      flushResponseLines();
       break;
     }
 
     case "tool_start": {
+      flushResponseLines();  // 先输出已缓冲的 response 行
+      flushResponseRemaining();
       if (event.requiresApproval) {
         process.stdout.write("\n   " + chalk.yellow.bold("⚠ 需要确认:"));
         process.stdout.write("\n   " + chalk.yellow(JSON.stringify(event.toolResult, null, 2)));
@@ -760,11 +784,15 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
     }
 
     case "tool_result": {
+      flushResponseLines();
+      flushResponseRemaining();
       renderToolResult(event.toolName, event.toolResult);
       break;
     }
 
     case "error": {
+      flushResponseLines();
+      flushResponseRemaining();
       process.stdout.write("\n   " + chalk.red("✗ ") + event.text + "\n\n");
       break;
     }
@@ -772,9 +800,7 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
     case "done": {
       if (event.source === "aux") return;
       thinkingActive = false;
-      if (event.text?.trim()) {
-        renderMarkdown(event.text, true);
-      }
+      flushResponseRemaining();
       process.stdout.write("\n");
       break;
     }
