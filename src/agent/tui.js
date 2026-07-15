@@ -797,7 +797,7 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
     }
 
     case "tool_start": {
-      flushResponseLines();  // 先输出已缓冲的 response 行
+      flushResponseLines();
       flushResponseRemaining();
       if (event.requiresApproval) {
         process.stdout.write("\n   " + chalk.yellow.bold("⚠ 需要确认:"));
@@ -805,16 +805,19 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
         process.stdout.write("\n   " + chalk.gray("(审批功能开发中，操作将继续运行)\n\n"));
         return;
       }
-      // 工具调用中：显示灰色标签
+      // 灰色进行中标签（tool_result 会覆盖此行）
       const label = toolLabel(event.toolName, event.toolParams);
       process.stdout.write("\n   " + chalk.dim(label) + "\n");
       break;
     }
 
     case "tool_result": {
-      flushResponseLines();
-      flushResponseRemaining();
-      renderToolResult(event.toolName, event.toolResult);
+      // 覆盖上一行灰色标签 → 绿色 ✓
+      process.stdout.write("\x1b[1A\r\x1b[K");
+      const doneLabel = toolDoneLabel(event.toolName, event.toolResult);
+      process.stdout.write("   " + doneLabel + "\n");
+      // 结果内容紧随其后
+      renderToolResultLines(event.toolName, event.toolResult);
       break;
     }
 
@@ -870,30 +873,98 @@ function toolDoneLabel(toolName, result) {
   }
 }
 
-function renderToolResult(toolName, result) {
-  if (!result) { process.stdout.write("\n"); return; }
+/** 渲染工具结果内容（不含标签，标签已在 tool_result case 中输出） */
+function renderToolResultLines(toolName, result) {
+  if (!result) return;
 
+  switch (toolName) {
+    case "shell": {
+      const output = result.stderr || result.stdout || "(无输出)";
+      const lines = output.split("\n");
+      for (const line of lines) {
+        process.stdout.write("   " + (result.stderr ? chalk.red(line) : chalk.white(line)) + "\n");
+      }
+      if (result.error && !result.stderr) {
+        process.stdout.write("   " + chalk.red(result.error.slice(0, 200)) + "\n");
+      }
+      break;
+    }
+    case "file-read": {
+      if (!result.success) {
+        process.stdout.write("   " + chalk.red(result.error || "读取失败") + "\n");
+      } else {
+        process.stdout.write("   " + chalk.dim(`(行 ${result.offset || 0}-${(result.offset || 0) + (result.lines || 0)} / 共 ${result.totalLines || "?"} 行)`) + "\n");
+      }
+      break;
+    }
+    case "file-write": {
+      if (!result.success) {
+        process.stdout.write("   " + chalk.red(result.error || "写入失败") + "\n");
+      }
+      break;
+    }
+    case "file-search": {
+      if (result.error) {
+        process.stdout.write("   " + chalk.red(result.error) + "\n");
+        return;
+      }
+      process.stdout.write("   " + chalk.dim(`(${result.count || 0} 个结果${result.truncated ? "，已截断" : ""})`) + "\n");
+      if (result.type === "filename" && result.files) {
+        for (const f of result.files.slice(0, 10)) {
+          process.stdout.write(chalk.gray("   │ ") + f + "\n");
+        }
+        if (result.files.length > 10) {
+          process.stdout.write(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.files.length - 10} 个`) + "\n");
+        }
+      }
+      if (result.type === "content" && result.matches) {
+        for (const m of result.matches.slice(0, 10)) {
+          process.stdout.write(chalk.gray(`   │ ${m.file}:${m.line}`) + "  " + m.text.slice(0, 120) + "\n");
+        }
+        if (result.matches.length > 10) {
+          process.stdout.write(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.matches.length - 10} 个`) + "\n");
+        }
+      }
+      break;
+    }
+    case "todo": {
+      const tasks = result.tasks || [];
+      if (tasks.length) {
+        for (const t of tasks) {
+          const icon = t.status === "completed" ? chalk.green("✓") :
+                       t.status === "in_progress" ? chalk.yellow("▶") : chalk.gray("○");
+          process.stdout.write(`     ${icon} ${t.content}\n`);
+        }
+      }
+      break;
+    }
+    default:
+      process.stdout.write("   " + chalk.gray(JSON.stringify(result).slice(0, 120)) + "\n");
+  }
+  process.stdout.write("\n");
+}
+
+// ── 旧渲染函数（echoMessages 复用）──
+
+function renderToolResult(toolName, result) {
+  if (!result) return;
+  // echo 时仍用旧格式
   switch (toolName) {
     case "shell":
       renderShellResult(result);
       break;
-
     case "file-read":
       renderFileReadResult(result);
       break;
-
     case "file-write":
       renderFileWriteResult(result);
       break;
-
     case "file-search":
       renderFileSearchResult(result);
       break;
-
     case "todo":
       renderTodoResult(result);
       break;
-
     default:
       process.stdout.write("   " + chalk.green("✓") + " " + chalk.gray(JSON.stringify(result).slice(0, 120)) + "\n\n");
   }
