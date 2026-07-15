@@ -371,7 +371,7 @@ export class MyProvider extends BaseProvider {
 
 本项目核心代码参考了以下开源项目：
 
-**DeepSeek Provider**: 参考 [TQZHR/deepseek2api](https://github.com/TQZHR/deepseek2api)：
+**[TQZHR/deepseek2api](https://github.com/TQZHR/deepseek2api)**
 - DeepSeek 登录认证与 Token 管理
 - PoW 挑战求解与代理请求
 - SSE 流式响应解析
@@ -379,12 +379,15 @@ export class MyProvider extends BaseProvider {
 - XML 工具调用解析 (Tool Parser) 与流式拦截 (Tool Sieve)
 - Function Calling prompt 构建与消息规范化
 
-**Qwen Provider**: 参考 [qwen2API](https://github.com/YuJunZhiXue/qwen2API)：
+**[qwen2API](https://github.com/YuJunZhiXue/qwen2API)**
 - SSE 流式响应解析（ParseQwenEvent）
 - 聊天 payload 构建格式
 - 基于邮箱和密码登录由我实现(小小的骄傲一下www)
 
-特此感谢 TQZHR 及 YuJunZhiXue 的开源贡献。
+**[pi](https://github.com/earendil-works/pi)**
+- agent及chat模式下的粘贴缩略逻辑
+
+特此感谢 TQZHR 、 YuJunZhiXue 以及 earendil-works 的开源贡献。
 
 ## License
 
