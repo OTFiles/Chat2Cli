@@ -668,7 +668,7 @@ function pushTextEvent(state, events, text) {
   events.push({ type: "text", text });
 }
 
-function createToolSieve(allowedToolNames = []) {
+export function createToolSieve(allowedToolNames = []) {
   const state = {
     allowedToolNames,
     capture: "",

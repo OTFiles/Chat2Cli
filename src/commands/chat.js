@@ -471,7 +471,7 @@ export function resetMarkdownState() {
   resetMarkdownRenderer();
 }
 
-async function chatLoop(provider, messages, currentModel, accountId, sessionId = null, parentMessageId = null, markdown = true, chatOverrides = {}) {
+async function chatLoop(provider, messages, currentModel, accountId, sessionId = null, parentMessageId = null, markdown = true, chatOverrides = {}, sessionRef = null) {
   // 输入文本占用的终端行数
   const PROMPT_CHAT = "   > ";
   const CONT_CHAT = "    "; // 续行前缀，与 PROMPT_CHAT 等宽（4 列）
@@ -1109,6 +1109,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       // 新会话首次创建后复用 sessionId（后续消息不再新开会话）
       if (!sessionId && result.sessionId) {
         sessionId = result.sessionId;
+        if (sessionRef) sessionRef.sessionId = sessionId;
       }
 
       // 更新 parentMessageId 供下次继聊使用（参照 deepseek2api onReady 更新）
@@ -1183,12 +1184,14 @@ async function runInteractiveChat(provider, opts = {}) {
     const convId = createId();
     printChatHeader(chatProvider.label, currentModel, convId.slice(0, 8));
     const messages = [];
-    await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown);
+    const sessionRef = { sessionId: null };
+    await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown, {}, sessionRef);
     if (messages.length > 0) {
       const conv = {
         id: convId, provider: chatProvider.name, model: currentModel,
         title: buildConversationTitle(messages), messages: [...messages],
-        accountId: accountId || "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+        accountId: accountId || "", dsSessionId: sessionRef.sessionId || undefined,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
       };
       saveConversation(conv);
       printSuccess(`对话已保存 (id: ${chalk.dim(convId.slice(0, 8))})`);
@@ -1207,13 +1210,15 @@ async function runInteractiveChat(provider, opts = {}) {
 
     printChatHeader(chatProvider.label, currentModel, convId.slice(0, 8));
     const messages = [];
-    await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown);
+    const sessionRef = { sessionId: null };
+    await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown, {}, sessionRef);
 
     if (messages.length > 0) {
       const conv = {
         id: convId, provider: chatProvider.name, model: currentModel,
         title: buildConversationTitle(messages), messages: [...messages],
-        accountId: accountId || "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+        accountId: accountId || "", dsSessionId: sessionRef.sessionId || undefined,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
       };
       saveConversation(conv);
       printSuccess(`对话已保存 (id: ${chalk.dim(convId.slice(0, 8))})`);
@@ -1231,14 +1236,15 @@ async function runInteractiveChat(provider, opts = {}) {
     printChatHeader(chatProvider.label, currentModel, conv.id.slice(0, 8));
     echoMessages(messages, useMarkdown);
 
-    await chatLoop(chatProvider, messages, currentModel, convAccountId, null, null, useMarkdown);
+    const sessionRef = { sessionId: conv.dsSessionId || null };
+    await chatLoop(chatProvider, messages, currentModel, convAccountId, conv.dsSessionId || null, null, useMarkdown, {}, sessionRef);
 
     if (messages.length > conv.messages.length) {
       updateStore((state) => ({
         ...state,
         conversations: state.conversations.map((c) =>
           c.id === conv.id
-            ? { ...c, model: currentModel, messages, updatedAt: new Date().toISOString() }
+            ? { ...c, model: currentModel, messages, dsSessionId: sessionRef.sessionId || c.dsSessionId, updatedAt: new Date().toISOString() }
             : c
         ),
       }));

@@ -26,6 +26,31 @@ export async function agentTui(context) {
     workingDir: workingDir || composite.workingDir
   });
 
+  // ── 回显已有对话历史 ──
+  if (composite.messages && composite.messages.length > 0) {
+    for (const msg of composite.messages) {
+      if (msg.role === "user") {
+        printUserMsg(msg.content.length > 500 ? `[共 ${msg.content.length} 个字符]` : msg.content);
+      } else if (msg.role === "assistant") {
+        // 显示思考内容
+        if (msg.thinking) {
+          const t = msg.thinking.replace(/\n/g, "\n   ");
+          process.stdout.write(chalk.gray("   " + t) + "\n");
+        }
+        // 显示正文
+        if (msg.content) {
+          const rendered = renderMarkdown(msg.content, true);
+          if (rendered) process.stdout.write(rendered + "\n");
+        }
+        process.stdout.write("\n");
+      } else if (msg.role === "tool") {
+        // 工具结果
+        renderToolResult(msg.toolName, msg.toolResult);
+      }
+    }
+    resetMarkdownRenderer();
+  }
+
   // 设置 raw mode
   const wasRaw = process.stdin.isRaw;
   process.stdin.setRawMode(true);
@@ -760,7 +785,11 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
 
     case "response": {
       if (event.source === "aux") return;
-      thinkingActive = false;
+      if (thinkingActive) {
+        // thinking→response 切换：立即换行，让用户看到响应开始了
+        process.stdout.write("\n");
+        thinkingActive = false;
+      }
       // 行缓冲：积累到完整行再渲染（参照 chat.js）
       responseLineBuf += event.text;
       flushResponseLines();
@@ -776,10 +805,9 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
         process.stdout.write("\n   " + chalk.gray("(审批功能开发中，操作将继续运行)\n\n"));
         return;
       }
-      // 非 shell 工具给个提示
-      if (event.toolName && event.toolName !== "shell") {
-        process.stdout.write("\n   " + chalk.dim(`🔧 ${event.toolName} ...`) + "\n");
-      }
+      // 工具调用中：显示灰色标签
+      const label = toolLabel(event.toolName, event.toolParams);
+      process.stdout.write("\n   " + chalk.dim(label) + "\n");
       break;
     }
 
@@ -808,6 +836,39 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
 }
 
 // ── 工具结果渲染 ──
+
+/** 工具调用中标签（灰色） */
+function toolLabel(toolName, params) {
+  switch (toolName) {
+    case "shell":
+      return `SHELL: ${params?.command || "..."}`;
+    case "file-read":
+      return `FILE-READ: ${params?.path || "..."}`;
+    case "file-write":
+      return `FILE-WRITE: ${params?.path || "..."}`;
+    case "file-search":
+      return `SEARCH: ${params?.pattern || "..."}`;
+    default:
+      return `${toolName}`;
+  }
+}
+
+/** 工具完成标签（绿色勾） */
+function toolDoneLabel(toolName, result) {
+  const prefix = chalk.green("✓ ");
+  switch (toolName) {
+    case "shell":
+      return prefix + chalk.bold("SHELL: ") + chalk.white(result?.command || "");
+    case "file-read":
+      return prefix + chalk.bold("FILE-READ: ") + chalk.gray(result?.path || "");
+    case "file-write":
+      return prefix + chalk.bold("FILE-WRITE: ") + chalk.gray(result?.message || result?.path || "");
+    case "file-search":
+      return prefix + chalk.bold("SEARCH: ") + chalk.gray(`${result?.type}: ${result?.pattern}`);
+    default:
+      return prefix + toolName;
+  }
+}
 
 function renderToolResult(toolName, result) {
   if (!result) { process.stdout.write("\n"); return; }
@@ -838,67 +899,51 @@ function renderToolResult(toolName, result) {
   }
 }
 
-/** Shell 结果：SHELL: cmd + 直接输出结果 */
+/** Shell 结果：✓ SHELL: cmd + 直接输出 */
 function renderShellResult(result) {
-  const cmd = result.command || "";
   const stdout = result.stdout || "";
   const stderr = result.stderr || "";
   const output = stderr || stdout || "(无输出)";
 
-  // 标题行: SHELL: command
-  process.stdout.write("\n   " + chalk.bold("SHELL: ") + chalk.white(cmd));
-
-  // 结果逐行输出
+  process.stdout.write("   " + toolDoneLabel("shell", result) + "\n");
   if (output) {
     const lines = output.split("\n");
     for (const line of lines) {
-      process.stdout.write("\n   " + (stderr ? chalk.red(line) : chalk.white(line)));
+      process.stdout.write("   " + (stderr ? chalk.red(line) : chalk.white(line)) + "\n");
     }
   }
   if (result.error && !stderr) {
-    process.stdout.write("\n   " + chalk.red(result.error.slice(0, 200)));
+    process.stdout.write("   " + chalk.red(result.error.slice(0, 200)) + "\n");
   }
-  process.stdout.write("\n");
 }
 
-/** 文件读取：只显示路径+行范围，不展示内容 */
+/** 文件读取：只显示路径+行范围 */
 function renderFileReadResult(result) {
   if (!result.success) {
-    process.stdout.write("   " + chalk.red("✗") + " " + chalk.gray(result.error || "读取失败") + "\n\n");
+    process.stdout.write("   " + chalk.red("✗ FILE-READ: ") + chalk.gray(result.error || "读取失败") + "\n");
     return;
   }
-
-  const path = result.path || "";
-  const offset = result.offset || 0;
-  const lines = result.lines || 0;
-  process.stdout.write("   " + chalk.green("✓") + chalk.bold(" FILE-READ") +
-    "  " + chalk.gray(path) +
-    "  " + chalk.dim(`(行 ${offset}-${offset + lines} / 共 ${result.totalLines || "?"} 行)`) + "\n\n");
+  process.stdout.write("   " + toolDoneLabel("file-read", result) +
+    "  " + chalk.dim(`(行 ${result.offset || 0}-${(result.offset || 0) + (result.lines || 0)} / 共 ${result.totalLines || "?"} 行)`) + "\n");
 }
 
-/** 文件写入：显示内容，最多 50 行 */
+/** 文件写入 */
 function renderFileWriteResult(result) {
   if (!result.success) {
-    process.stdout.write("   " + chalk.red("✗") + " " + chalk.gray(result.error || "写入失败") + "\n\n");
+    process.stdout.write("   " + chalk.red("✗ FILE-WRITE: ") + chalk.gray(result.error || "写入失败") + "\n");
     return;
   }
-
-  process.stdout.write("   " + chalk.green("✓") + chalk.bold(" FILE-WRITE") +
-    "  " + chalk.gray(result.message || result.path || "") + "\n\n");
+  process.stdout.write("   " + toolDoneLabel("file-write", result) + "\n");
 }
 
-/** 文件搜索：显示匹配列表，最多 10 条 */
+/** 文件搜索 */
 function renderFileSearchResult(result) {
   if (!result.success && result.error) {
-    process.stdout.write("   " + chalk.red("✗") + " " + chalk.gray(result.error) + "\n\n");
+    process.stdout.write("   " + chalk.red("✗ SEARCH: ") + chalk.gray(result.error) + "\n");
     return;
   }
-
-  const count = result.count || 0;
-  process.stdout.write("   " + chalk.green("✓") + chalk.bold(" SEARCH") +
-    "  " + chalk.gray(`${result.type}: ${result.pattern}`) +
-    "  " + chalk.dim(`(${count} 个结果${result.truncated ? "，已截断" : ""})`) + "\n");
-
+  process.stdout.write("   " + toolDoneLabel("file-search", result) +
+    "  " + chalk.dim(`(${result.count || 0} 个结果${result.truncated ? "，已截断" : ""})`) + "\n");
   if (result.type === "filename" && result.files) {
     for (const f of result.files.slice(0, 10)) {
       process.stdout.write(chalk.gray("   │ ") + f + "\n");
@@ -915,7 +960,6 @@ function renderFileSearchResult(result) {
       process.stdout.write(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.matches.length - 10} 个`) + "\n");
     }
   }
-  process.stdout.write("\n");
 }
 
 /** 任务清单：显示完整列表 */

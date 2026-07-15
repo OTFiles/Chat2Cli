@@ -1,6 +1,6 @@
 import {
   parseToolCallsFromText, buildPromptFromMessages,
-  consumeQwenStream
+  consumeQwenStream, createToolSieve
 } from "../bridge.js";
 import { streamDeltasWithMessageId } from "../providers/deepseek/chat.js";
 import { executeToolCall, TOOL_DEFINITIONS } from "./tools/registry.js";
@@ -172,9 +172,13 @@ export async function* runAgentLoop(userInput, context) {
 
   appendMessage(composite, { role: "user", content: userInput, source: "user" });
 
+  // 标记本轮起点：后续循环中所有新消息都从此处开始
+  composite._turnStartIdx = composite.messages.length;
+
   let iteration = 0;
-  let sessionId = null;
-  let parentMessageId = null;
+  // 从 composite 恢复会话（续聊时复用已有 session）
+  let sessionId = composite.main?.sessionId || null;
+  let parentMessageId = composite.main?.parentMessageId || null;
 
   while (iteration < maxIterations) {
     if (signal?.aborted) {
@@ -186,16 +190,20 @@ export async function* runAgentLoop(userInput, context) {
 
     const messages = buildMessagesForMain(composite, workingDir);
 
-    // 首轮：完整 prompt；续聊：思考 + 所有工具结果
+    // 首轮：完整 prompt；续聊：区分"用户新输入"和"工具执行后续聊"
     let prompt;
     if (sessionId) {
-      // 续聊：收集本轮新消息（思考 + 工具结果）构建续聊 prompt
       const newMsgs = composite.messages.slice(composite._turnStartIdx || 0);
-      const thinking = newMsgs.find((m) => m.role === "assistant")?.thinking || "";
-      const toolResults = newMsgs
-        .filter((m) => m.role === "tool")
-        .map((m) => m.content || "");
-      prompt = buildContinuationPrompt(thinking, toolResults);
+      const toolResults = newMsgs.filter((m) => m.role === "tool");
+
+      if (toolResults.length > 0) {
+        // 工具执行后续聊：思考 + 所有工具结果
+        const thinking = newMsgs.find((m) => m.role === "assistant")?.thinking || "";
+        prompt = buildContinuationPrompt(thinking, toolResults.map((m) => m.content || ""));
+      } else {
+        // 用户新输入（已有 session）：只发送用户消息
+        prompt = userInput;
+      }
     } else {
       prompt = buildPromptFromMessages(messages);
     }
@@ -220,24 +228,47 @@ export async function* runAgentLoop(userInput, context) {
 
       if (!sessionId && resp._sessionId) {
         sessionId = resp._sessionId;
+        composite.main.sessionId = sessionId;
+        // 持久化 sessionId 到文件
+        const { saveComposite } = await import("./storage/composite.js");
+        saveComposite(composite);
       }
 
-      // ── 流式消费：分离 thinking / response ──
+      // ── 流式消费：分离 thinking / response，过滤工具调用 XML ──
       const consumer = createAgentStreamConsumer(mainProvider, resp);
+      const toolSieve = createToolSieve([]);  // 实时过滤 <tool_calls> XML
       let thinkingText = "";
       let responseText = "";
 
       for await (const event of consumer.deltas()) {
         if (event.type === "thinking") {
           thinkingText += event.text;
+          yield event;
         } else {
           responseText += event.text;
+          // 通过 tool sieve 过滤，只 yield 纯文本部分
+          const sieveEvents = toolSieve.push(event.text);
+          for (const se of sieveEvents) {
+            if (se.type === "text" && se.text) {
+              yield { type: "response", text: se.text };
+            }
+          }
         }
-        yield event; // 渲染给 UI
+      }
+
+      // flush sieve 尾部（防止最后的不完整 XML 残留）
+      if (toolSieve) {
+        const tailEvents = toolSieve.flush();
+        for (const se of tailEvents) {
+          if (se.type === "text" && se.text) {
+            yield { type: "response", text: se.text };
+          }
+        }
       }
 
       if (consumer.messageId) {
         parentMessageId = consumer.messageId;
+        composite.main.parentMessageId = consumer.messageId;
       }
 
       // ── 只从 response 中解析工具调用（thinking 中的预演不算）──
@@ -275,7 +306,7 @@ export async function* runAgentLoop(userInput, context) {
             params = {};
           }
 
-          yield { type: "tool_start", toolName, text: `🔧 ${toolName}` };
+          yield { type: "tool_start", toolName, toolParams: params, text: `🔧 ${toolName}` };
 
           const toolResult = await executeToolCall(toolName, params, {
             workingDir,

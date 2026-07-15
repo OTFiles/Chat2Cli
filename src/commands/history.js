@@ -109,7 +109,7 @@ async function continueConversation(convId) {
   printSuccess(`继续对话: ${chalk.bold(conv.title)}\n`);
   const messages = [...conv.messages];
   let currentModel = conv.model;
-  const sessionId = conv.dsSessionId || null;
+  let sessionId = conv.dsSessionId || null;
 
   // 回显已有消息
   for (const msg of messages) {
@@ -135,6 +135,8 @@ async function continueConversation(convId) {
 
       try {
         for await (const delta of provider.chat(messages, { model: currentModel, sessionId })) {
+          if (delta.kind === "__sessionId") { sessionId = delta.text; continue; }
+          if (delta.kind === "__messageId") { continue; }
           if (firstChunk) { spinner.stop(); process.stdout.write(chalk.green("AI: ")); firstChunk = false; }
           if (delta.kind === "thinking") { thinking += delta.text; printAiContent(delta.text, true); }
           else { response += delta.text; printAiContent(delta.text, false); }
@@ -157,7 +159,7 @@ async function continueConversation(convId) {
     updateStore((state) => ({
       ...state,
       conversations: state.conversations.map((c) => c.id === conv.id
-        ? { ...c, model: currentModel, messages, updatedAt: new Date().toISOString() }
+        ? { ...c, model: currentModel, messages, dsSessionId: sessionId || c.dsSessionId, updatedAt: new Date().toISOString() }
         : c)
     }));
   }
