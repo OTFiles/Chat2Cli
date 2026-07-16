@@ -109,7 +109,7 @@ function buildMessagesForAux(composite, workingDir, task) {
 
 function stripToolXml(text) {
   if (!text) return "";
-  return text.replace(/<tool_calls>[\s\S]*?<\/tool_calls>/g, "").replace(/<tool_call[\s\S]*?<\/tool_call>/g, "").trim();
+  return text.replace(/<invoke\b[^>]*\/>/gi, "").replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, "").trim();
 }
 
 // ── 续聊 prompt 构建 ──

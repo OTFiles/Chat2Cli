@@ -282,16 +282,11 @@ function formatPromptToolCalls(toolCalls, toolNameById) {
       if (!name) return "";
       if (callId) toolNameById.set(callId, name);
 
-      return [
-        "  <tool_call>",
-        `    <tool_name>${name}</tool_name>`,
-        `    <parameters><![CDATA[${toCdata(argumentsText)}]]></parameters>`,
-        "  </tool_call>"
-      ].join("\n");
+      return `<invoke name="${name}">\n<![CDATA[${toCdata(argumentsText)}]]>\n</invoke>`;
     })
     .filter(Boolean);
 
-  return blocks.length ? `<tool_calls>\n${blocks.join("\n")}\n</tool_calls>` : "";
+  return blocks.join("\n");
 }
 
 function normalizeAssistantPromptContent(message, toolNameById) {
@@ -365,19 +360,18 @@ function buildToolPrompt(allowedToolNames, tools) {
     "You may include normal assistant text before and/or after the XML block when appropriate.",
     "Do not wrap the XML in markdown code fences.",
     "",
-    "<tool_calls>",
-    "  <tool_call>",
-    "    <tool_name>TOOL_NAME_HERE</tool_name>",
-    "    <parameters>{\"key\":\"value\"}</parameters>",
-    "  </tool_call>",
-    "</tool_calls>",
+    "<invoke name=\"TOOL_NAME\" param1=\"value1\" />",
+    "",
+    "For tools that need a content body (e.g. file-write), put the content between tags:",
+    "<invoke name=\"file-write\" path=\"file.txt\" mode=\"create\">",
+    "content here",
+    "</invoke>",
     "",
     "RULES:",
     "1) Output raw XML block exactly where the tool call should happen.",
-    "2) <parameters> MUST contain a strict JSON object with double-quoted keys.",
-    "3) Multiple tools go inside one <tool_calls> root.",
-    "4) Use only declared tool names and exact schema field names.",
-    "5) If you do not need a tool, answer normally without XML."
+    "2) Attribute values containing double-quotes should use single-quote delimiters.",
+    "3) Use only declared tool names and exact schema field names.",
+    "4) If you do not need a tool, answer normally without XML."
   ].join("\n");
 }
 
@@ -441,57 +435,31 @@ export function buildOpenAiPrompt({ messages, tools, toolChoice }) {
   };
 }
 
-// ── 工具调用解析（从 XML 响应中提取 tool_calls）──
-//  参考 openai-tool-parser.js
+// ── 工具调用解析（invoke 格式）──
 
-const TOOL_BLOCK_PATTERN = /<(?:[a-z0-9_:-]+:)?(tool_call|function_call|invoke)\b([^>]*)>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?\1>/gi;
-const TOOL_SELFCLOSE_PATTERN = /<(?:[a-z0-9_:-]+:)?invoke\b([^>]*)\/>/gi;
-const TOOL_KV_PATTERN = /<(?:[a-z0-9_:-]+:)?([a-z0-9_.-]+)\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?\1>/gi;
-const TOOL_NAME_PATTERNS = Object.freeze([
-  /<(?:[a-z0-9_:-]+:)?tool_name\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?tool_name>/i,
-  /<(?:[a-z0-9_:-]+:)?function_name\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?function_name>/i,
-  /<(?:[a-z0-9_:-]+:)?name\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?name>/i,
-  /<(?:[a-z0-9_:-]+:)?function\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?function>/i
-]);
-const TOOL_ARGS_PATTERNS = Object.freeze([
-  /<(?:[a-z0-9_:-]+:)?input\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?input>/i,
-  /<(?:[a-z0-9_:-]+:)?arguments\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?arguments>/i,
-  /<(?:[a-z0-9_:-]+:)?argument\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?argument>/i,
-  /<(?:[a-z0-9_:-]+:)?parameters\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?parameters>/i,
-  /<(?:[a-z0-9_:-]+:)?parameter\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?parameter>/i,
-  /<(?:[a-z0-9_:-]+:)?args\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?args>/i,
-  /<(?:[a-z0-9_:-]+:)?params\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?params>/i
-]);
-const TOOL_ATTR_PATTERN = /(name|function|tool)\s*=\s*"([^"]+)"/i;
+/** 匹配自闭合和带体的 <invoke> 标签 */
+const INVOKE_PATTERN = /<invoke\b([^>]*?)(?:\/>|>([\s\S]*?)<\/invoke>)/gi;
 const ALL_ATTR_PATTERN = /([a-z0-9_.:-]+)\s*=\s*("[^"]*"|'[^']*')/gi;
 
-/** 从 XML 属性字符串中提取所有 key="value" / key='value' 对，value 尝试 JSON 解析 */
-function parseAllAttributes(attrs) {
-  const result = {};
-  for (const match of toStringSafe(attrs).matchAll(ALL_ATTR_PATTERN)) {
-    const key = match[1].trim();
-    if (!key || Object.hasOwn(result, key)) continue;
-    const raw = match[2];
-    const unquoted = raw.slice(1, -1);
-    const text = decodeXmlText(unquoted);
-    try { result[key] = JSON.parse(text); } catch { result[key] = text; }
-  }
-  return result;
-}
-
-function stripFencedCodeBlocks(text) {
-  return toStringSafe(text).replace(/```[\s\S]*?```/g, " ");
-}
-
+/** 解码 XML 实体（不 trim，用于属性值） */
 function decodeXmlText(text) {
-  const raw = toStringSafe(text).trim();
-  const cdataMatch = raw.match(/^<!\[CDATA\[([\s\S]*?)]]>$/i);
-  const source = cdataMatch?.[1] ?? raw;
-  return source
+  return toStringSafe(text)
     .replaceAll("&amp;", "&")
     .replaceAll("&lt;", "<")
     .replaceAll("&gt;", ">")
-    .replaceAll("&quot;", "\"")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#039;", "'")
+    .replaceAll("&#x27;", "'");
+}
+
+/** 解码实体 + 保留原样（用于标签体内容） */
+function decodeBodyText(text) {
+  return text
+    .replace(/^<!\[CDATA\[([\s\S]*?)]]>$/i, "$1")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
     .replaceAll("&#039;", "'")
     .replaceAll("&#x27;", "'");
 }
@@ -503,113 +471,54 @@ function parseJsonObject(text) {
   } catch { return null; }
 }
 
-function findTagValue(text, patterns) {
-  const source = toStringSafe(text);
-  for (const pattern of patterns) {
-    const match = source.match(pattern);
-    if (match?.[1] !== undefined) return decodeXmlText(match[1]);
+/** 从 XML 属性字符串中提取所有 key="value" / key='value' 对，value 尝试 JSON 解析 */
+function parseAllAttributes(attrs) {
+  const result = {};
+  for (const match of toStringSafe(attrs).matchAll(ALL_ATTR_PATTERN)) {
+    const key = match[1].trim();
+    if (!key || Object.hasOwn(result, key)) continue;
+    const unquoted = match[2].slice(1, -1);
+    const text = decodeXmlText(unquoted);
+    try { result[key] = JSON.parse(text); } catch { result[key] = text; }
   }
-  return "";
-}
-
-function appendMarkupValue(output, key, value) {
-  if (!Object.hasOwn(output, key)) { output[key] = value; return; }
-  const current = output[key];
-  output[key] = Array.isArray(current) ? [...current, value] : [current, value];
-}
-
-function parseMarkupValue(raw) {
-  const text = decodeXmlText(raw);
-  if (!text.trim()) return "";
-  if (text.includes("<") && text.includes(">")) {
-    const nested = parseMarkupInput(text);
-    if (nested && Object.keys(nested).length > 0) return nested;
-  }
-  const parsedJson = parseJsonObject(text);
-  if (parsedJson) return parsedJson;
-  try { return JSON.parse(text); } catch { return text; }
-}
-
-function parseMarkupObject(text) {
-  const output = {};
-  for (const match of toStringSafe(text).matchAll(TOOL_KV_PATTERN)) {
-    const key = toStringSafe(match[1]).trim();
-    if (!key) continue;
-    appendMarkupValue(output, key, parseMarkupValue(match[2]));
-  }
-  return output;
-}
-
-function parseMarkupInput(raw) {
-  const text = decodeXmlText(raw);
-  const markupObject = parseMarkupObject(text);
-  if (Object.keys(markupObject).length > 0) return markupObject;
-  return parseJsonObject(text) ?? {};
+  return result;
 }
 
 function buildParsedToolCall(name, argumentsText) {
-  const normalized = argumentsText.trim() ? argumentsText.trim() : "{}";
+  const normalized = argumentsText.trim() || "{}";
   return {
     id: `call_${randomUUID().replaceAll("-", "")}`,
     name,
     argumentsText: normalized,
-    input: parseJsonObject(normalized) ?? parseMarkupInput(normalized)
+    input: parseJsonObject(normalized) ?? {}
   };
 }
 
 function parseMarkupBlock(attrs, inner) {
-  // 1. 尝试完整 JSON body：{"name":"...","input":{...}}
-  const jsonTool = parseJsonObject(inner);
-  if (jsonTool?.name) {
-    return buildParsedToolCall(jsonTool.name, JSON.stringify(jsonTool.input ?? {}));
-  }
-
-  // 2. 从属性中提取 name 和所有参数
   const attrParams = parseAllAttributes(attrs);
-  const attrName = attrParams.name ?? "";
-
-  // 3. name 优先属性，fallback 内层 <tool_name>/<name> 标签
-  const name = attrName.trim() || findTagValue(inner, TOOL_NAME_PATTERNS).trim();
+  const name = (attrParams.name ?? "").trim();
   if (!name) return null;
 
-  // 4. 参数来源（后者覆盖前者）：属性（去掉 name）+ 内层 XML 子元素
-  const { name: _, ...baseParams } = attrParams;
-  const argsRaw = findTagValue(inner, TOOL_ARGS_PATTERNS);
-  const innerParams = argsRaw ? parseMarkupInput(argsRaw) : parseMarkupObject(inner);
-  const merged = { ...baseParams, ...innerParams };
+  const { name: _, ...params } = attrParams;
 
-  // 5. 如果内层是纯文本（没有 XML 子元素），作为 content 参数（不 trim，保留首行空行给 file-write 处理）
+  // 标签体文本 → content 参数（不 trim，保留首行空行给 file-write 处理）
   const innerText = inner.trim();
-  const hasInnerMarkup = argsRaw || Object.keys(innerParams).length > 0;
-  if (innerText && !hasInnerMarkup && !merged.content) {
-    merged.content = inner
-      .replace(/^<!\[CDATA\[([\s\S]*?)]]>$/i, "$1")
-      .replaceAll("&amp;", "&")
-      .replaceAll("&lt;", "<")
-      .replaceAll("&gt;", ">")
-      .replaceAll("&quot;", '"')
-      .replaceAll("&#039;", "'")
-      .replaceAll("&#x27;", "'");
+  if (innerText && !params.content) {
+    params.content = decodeBodyText(inner);
   }
 
-  const argumentsText = JSON.stringify(Object.keys(merged).length ? merged : {});
-  return buildParsedToolCall(name, argumentsText);
+  return buildParsedToolCall(name, JSON.stringify(Object.keys(params).length ? params : {}));
 }
 
 function parseMarkupToolCalls(text) {
   const output = [];
   const source = toStringSafe(text).trim();
-
-  for (const match of source.matchAll(TOOL_BLOCK_PATTERN)) {
-    const parsed = parseMarkupBlock(toStringSafe(match[2]).trim(), toStringSafe(match[3]));
+  for (const match of source.matchAll(INVOKE_PATTERN)) {
+    const attrs = toStringSafe(match[1]).trim();
+    const inner = toStringSafe(match[2] ?? "");
+    const parsed = parseMarkupBlock(attrs, inner);
     if (parsed) output.push(parsed);
   }
-
-  for (const match of source.matchAll(TOOL_SELFCLOSE_PATTERN)) {
-    const parsed = parseMarkupBlock(toStringSafe(match[1]).trim(), "");
-    if (parsed) output.push(parsed);
-  }
-
   return output;
 }
 
@@ -622,10 +531,7 @@ function filterAllowedToolCalls(calls, allowedToolNames) {
 export function parseToolCallsFromText(text, allowedToolNames = []) {
   const source = toStringSafe(text);
   if (!source.trim()) return [];
-  // 预检：快速跳过不含工具调用的文本，但不过滤 code fence（AI 可能不遵守"不用代码块"的规则）
-  if (!source.match(/<(tool_calls|tool_call|function_call|invoke|tool_use)\b/i)) {
-    return [];
-  }
+  if (!source.match(/<invoke\b/i)) return [];
   return filterAllowedToolCalls(parseMarkupToolCalls(source), allowedToolNames);
 }
 
@@ -633,12 +539,7 @@ export function parseToolCallsFromText(text, allowedToolNames = []) {
 //  参考 openai-tool-sieve.js
 
 const TOOL_CAPTURE_PAIRS = Object.freeze([
-  { open: "<tool_calls", close: "</tool_calls>" },
-  { open: "<function_calls", close: "</function_calls>" },
-  { open: "<tool_call", close: "</tool_call>" },
-  { open: "<function_call", close: "</function_call>" },
-  { open: "<invoke", close: "</invoke>" },
-  { open: "<tool_use", close: "</tool_use>" }
+  { open: "<invoke", close: "</invoke>" }
 ]);
 
 function isInsideCodeFence(state, prefix) {
