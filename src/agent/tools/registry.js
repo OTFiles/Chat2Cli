@@ -34,7 +34,8 @@ export const TOOL_DEFINITIONS = [
       mode: { type: "string", required: true, description: "create（创建/覆盖）或 replace（内容替换）" },
       content: { type: "string", required: false, description: "mode=create 时：要写入的完整内容" },
       old_string: { type: "string", required: false, description: "mode=replace 时：要替换的原始文本（需精确匹配）" },
-      new_string: { type: "string", required: false, description: "mode=replace 时：替换后的新文本" }
+      new_string: { type: "string", required: false, description: "mode=replace 时：替换后的新文本" },
+      keep_leading_blank: { type: "boolean", required: false, description: "mode=create 时：是否保留首行空行（默认 false，自动去除首行空白行）" }
     }
   },
   {
@@ -191,7 +192,7 @@ function executeFileRead(params, context) {
 // ── file-write ──
 
 function executeFileWrite(params, context) {
-  const { path: filePath, mode, content, old_string, new_string } = params;
+  const { path: filePath, mode, content, old_string, new_string, keep_leading_blank } = params;
   const cwd = context.workingDir || process.cwd();
   const absPath = resolve(cwd, filePath || "");
 
@@ -204,7 +205,9 @@ function executeFileWrite(params, context) {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      writeFileSync(absPath, content, "utf8");
+      // 默认去除第一行空行，keep_leading_blank=true 时保留
+      const finalContent = keep_leading_blank ? content : (typeof content === "string" ? content.replace(/^\r?\n/, "") : content);
+      writeFileSync(absPath, finalContent, "utf8");
       return {
         result: {
           success: true,

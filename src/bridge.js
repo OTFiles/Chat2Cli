@@ -59,8 +59,10 @@ async function consumeStream(bodyStream, onDelta) {
   const parser = createSseParser(({ data }) => {
     if (!data) return;
     try {
-      const delta = deltaDecoder.consume(data);
-      if (delta) onDelta(delta);
+      const deltas = deltaDecoder.consume(data);
+      if (deltas && deltas.length > 0) {
+        for (const d of deltas) onDelta(d);
+      }
     } catch {
       // skip unparseable frames
     }
@@ -84,8 +86,8 @@ export async function* consumeRawStream(bodyStream) {
   const parser = createSseParser(({ data }) => {
     if (!data) return;
     try {
-      const delta = deltaDecoder.consume(data);
-      if (delta) pending.push(delta);
+      const deltas = deltaDecoder.consume(data);
+      if (deltas && deltas.length > 0) pending.push(...deltas);
     } catch {
       // skip unparseable frames
     }
@@ -135,20 +137,22 @@ function extractExtraSummaryText(extra) {
 }
 
 /**
- * 将 Qwen SSE 数据行解析为 { kind, text } delta。
+ * 将 Qwen SSE 数据行解析为 { kind, text } delta 数组。
  * 参照 qwen2API upstream/sse_consumer.go ParseQwenEvent()
- * - 支持 delta 中多种 reasoning 字段（reasoning_content / reasoning / reasoning_text / thinking / thoughts）
- * - 支持 extra 子对象中的 reasoning 字段 + summary_title / summary_thought
- * - 支持顶层 fallback（content / answer / text / delta / reasoning_content / reasoning / thinking）
+ * 与 Qwen provider 自身的 parseQwenSseData 保持一致：
+ * 同一帧中同时存在 reasoning 和 content 时，两者都返回。
+ *
+ * 返回 Array<{kind: string, text: string}>，可能包含 0~2 个元素。
  */
 export function createQwenDeltaDecoder() {
   return {
     consume(jsonStr) {
       try {
         const obj = JSON.parse(jsonStr);
+        const results = [];
 
         // 跳过 response.created 等元数据事件
-        if (obj["response.created"]) return null;
+        if (obj["response.created"]) return results;
 
         const choice = obj?.choices?.[0];
         if (choice?.delta) {
@@ -164,27 +168,25 @@ export function createQwenDeltaDecoder() {
           );
           // thinking_summary 阶段：extra.summary_title / extra.summary_thought
           const summaryThinking = extractExtraSummaryText(extra);
+          const combinedThinking = [reasoning, summaryThinking].filter(Boolean).join("\n");
 
-          if (reasoning || summaryThinking) {
-            const combined = [reasoning, summaryThinking].filter(Boolean).join("\n");
-            if (combined) return { kind: "thinking", text: combined };
-          }
+          if (combinedThinking) results.push({ kind: "thinking", text: combinedThinking });
 
           const content = firstNonEmpty(delta.content);
-          if (content) return { kind: "response", text: content };
+          if (content) results.push({ kind: "response", text: content });
 
-          return null;
+          if (results.length > 0) return results;
         }
 
         // 顶层 fallback
         const topReasoning = firstNonEmpty(obj.reasoning_content, obj.reasoning, obj.thinking);
-        if (topReasoning) return { kind: "thinking", text: topReasoning };
+        if (topReasoning) results.push({ kind: "thinking", text: topReasoning });
         const topContent = firstNonEmpty(obj.content, obj.answer, obj.text, obj.delta);
-        if (topContent) return { kind: "response", text: topContent };
+        if (topContent) results.push({ kind: "response", text: topContent });
 
-        return null;
+        return results;
       } catch {
-        return null;
+        return [];
       }
     }
   };
@@ -192,6 +194,8 @@ export function createQwenDeltaDecoder() {
 
 /**
  * 消费 Qwen 的 SSE 流，yield { kind, text } deltas。
+ * 注意：createQwenDeltaDecoder 现在返回数组，
+ * 同一帧可能同时包含 thinking 和 response。
  */
 export async function consumeQwenStream(bodyStream, onDelta) {
   if (!bodyStream) return;
@@ -201,8 +205,10 @@ export async function consumeQwenStream(bodyStream, onDelta) {
   const parser = createSseParser(({ data }) => {
     if (!data) return;
     try {
-      const delta = deltaDecoder.consume(data);
-      if (delta) onDelta(delta);
+      const deltas = deltaDecoder.consume(data);
+      if (deltas && deltas.length > 0) {
+        for (const delta of deltas) onDelta(delta);
+      }
     } catch {
       // skip unparseable frames
     }
@@ -457,6 +463,21 @@ const TOOL_ARGS_PATTERNS = Object.freeze([
   /<(?:[a-z0-9_:-]+:)?params\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_:-]+:)?params>/i
 ]);
 const TOOL_ATTR_PATTERN = /(name|function|tool)\s*=\s*"([^"]+)"/i;
+const ALL_ATTR_PATTERN = /([a-z0-9_.:-]+)\s*=\s*("[^"]*"|'[^']*')/gi;
+
+/** 从 XML 属性字符串中提取所有 key="value" / key='value' 对，value 尝试 JSON 解析 */
+function parseAllAttributes(attrs) {
+  const result = {};
+  for (const match of toStringSafe(attrs).matchAll(ALL_ATTR_PATTERN)) {
+    const key = match[1].trim();
+    if (!key || Object.hasOwn(result, key)) continue;
+    const raw = match[2];
+    const unquoted = raw.slice(1, -1);
+    const text = decodeXmlText(unquoted);
+    try { result[key] = JSON.parse(text); } catch { result[key] = text; }
+  }
+  return result;
+}
 
 function stripFencedCodeBlocks(text) {
   return toStringSafe(text).replace(/```[\s\S]*?```/g, " ");
@@ -537,18 +558,41 @@ function buildParsedToolCall(name, argumentsText) {
 }
 
 function parseMarkupBlock(attrs, inner) {
+  // 1. 尝试完整 JSON body：{"name":"...","input":{...}}
   const jsonTool = parseJsonObject(inner);
   if (jsonTool?.name) {
     return buildParsedToolCall(jsonTool.name, JSON.stringify(jsonTool.input ?? {}));
   }
 
-  const attrName = attrs.match(TOOL_ATTR_PATTERN)?.[2] ?? "";
+  // 2. 从属性中提取 name 和所有参数
+  const attrParams = parseAllAttributes(attrs);
+  const attrName = attrParams.name ?? "";
+
+  // 3. name 优先属性，fallback 内层 <tool_name>/<name> 标签
   const name = attrName.trim() || findTagValue(inner, TOOL_NAME_PATTERNS).trim();
   if (!name) return null;
 
+  // 4. 参数来源（后者覆盖前者）：属性（去掉 name）+ 内层 XML 子元素
+  const { name: _, ...baseParams } = attrParams;
   const argsRaw = findTagValue(inner, TOOL_ARGS_PATTERNS);
-  const parsedInput = argsRaw ? parseMarkupInput(argsRaw) : parseMarkupObject(inner);
-  const argumentsText = JSON.stringify(parsedInput && Object.keys(parsedInput).length ? parsedInput : {});
+  const innerParams = argsRaw ? parseMarkupInput(argsRaw) : parseMarkupObject(inner);
+  const merged = { ...baseParams, ...innerParams };
+
+  // 5. 如果内层是纯文本（没有 XML 子元素），作为 content 参数（不 trim，保留首行空行给 file-write 处理）
+  const innerText = inner.trim();
+  const hasInnerMarkup = argsRaw || Object.keys(innerParams).length > 0;
+  if (innerText && !hasInnerMarkup && !merged.content) {
+    merged.content = inner
+      .replace(/^<!\[CDATA\[([\s\S]*?)]]>$/i, "$1")
+      .replaceAll("&amp;", "&")
+      .replaceAll("&lt;", "<")
+      .replaceAll("&gt;", ">")
+      .replaceAll("&quot;", '"')
+      .replaceAll("&#039;", "'")
+      .replaceAll("&#x27;", "'");
+  }
+
+  const argumentsText = JSON.stringify(Object.keys(merged).length ? merged : {});
   return buildParsedToolCall(name, argumentsText);
 }
 
@@ -557,7 +601,7 @@ function parseMarkupToolCalls(text) {
   const source = toStringSafe(text).trim();
 
   for (const match of source.matchAll(TOOL_BLOCK_PATTERN)) {
-    const parsed = parseMarkupBlock(toStringSafe(match[2]).trim(), toStringSafe(match[3]).trim());
+    const parsed = parseMarkupBlock(toStringSafe(match[2]).trim(), toStringSafe(match[3]));
     if (parsed) output.push(parsed);
   }
 
@@ -578,7 +622,8 @@ function filterAllowedToolCalls(calls, allowedToolNames) {
 export function parseToolCallsFromText(text, allowedToolNames = []) {
   const source = toStringSafe(text);
   if (!source.trim()) return [];
-  if (!stripFencedCodeBlocks(source).match(/<(tool_calls|tool_call|function_call|invoke|tool_use)\b/i)) {
+  // 预检：快速跳过不含工具调用的文本，但不过滤 code fence（AI 可能不遵守"不用代码块"的规则）
+  if (!source.match(/<(tool_calls|tool_call|function_call|invoke|tool_use)\b/i)) {
     return [];
   }
   return filterAllowedToolCalls(parseMarkupToolCalls(source), allowedToolNames);
@@ -646,6 +691,20 @@ function consumeCapturedToolBlock(captured, allowedToolNames) {
   for (const pair of TOOL_CAPTURE_PAIRS) {
     const openIndex = lower.indexOf(pair.open);
     if (openIndex < 0) continue;
+
+    // 自闭合检测：/> 出现在下一个 < 之前
+    const afterOpen = captured.slice(openIndex + pair.open.length);
+    const nextTagIdx = afterOpen.indexOf("<");
+    const scIdx = afterOpen.indexOf("/>");
+    if (scIdx >= 0 && (nextTagIdx < 0 || scIdx < nextTagIdx)) {
+      const closeEnd = openIndex + pair.open.length + scIdx + 2;
+      return {
+        ready: true,
+        prefix: captured.slice(0, openIndex),
+        calls: parseToolCallsFromText(captured.slice(openIndex, closeEnd), allowedToolNames),
+        suffix: captured.slice(closeEnd)
+      };
+    }
 
     const closeIndex = lower.lastIndexOf(pair.close);
     if (closeIndex < openIndex) return { ready: false };

@@ -36,14 +36,18 @@ ${toolSection}
 
 ## 工具调用格式
 
-<tool_calls>
-  <tool_call>
-    <tool_name>工具名</tool_name>
-    <parameters>{"参数名":"参数值"}</parameters>
-  </tool_call>
-</tool_calls>
+简洁的属性式 XML：
 
-规则同主 AI，<parameters> 必须是严格的 JSON 对象。`;
+\`\`\`
+<invoke name="工具名" 参数="值" />
+\`\`\`
+
+示例：
+- \`<invoke name="shell" command="ls -la" />\`
+- \`<invoke name="file-read" path="/path/to/file.txt" />\`
+- \`<invoke name="file-search" type="filename" pattern="*.py" />\`
+
+属性值含双引号时用单引号包裹。规则同主 AI。`;
 }
 
 function buildAuxToolSection(toolDefinitions) {

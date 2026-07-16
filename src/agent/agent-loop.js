@@ -118,24 +118,47 @@ function buildContinuationPrompt(thinking, toolResults) {
   const parts = [];
   if (thinking && thinking.trim()) {
     const cleanThinking = stripToolXml(thinking).trim();
-    if (cleanThinking) parts.push(`以下是上一轮的思考内容：\n\n<think>\n${cleanThinking}\n</think>`);
+    if (cleanThinking) parts.push(`上一轮的思考内容：\n\n<think>\n${cleanThinking}\n</think>`);
   }
   if (toolResults.length > 0) {
     parts.push("工具执行结果：\n");
-    for (const r of toolResults) parts.push(r + "\n");
+    for (const r of toolResults) {
+      const content = (r || "").trim();
+      if (content) parts.push(content + "\n");
+    }
   }
-  return parts.join("\n").trim();
+  const result = parts.join("\n").trim();
+  // 兜底：如果结果为空，返回一个最小有效 prompt
+  return result || "请继续。";
 }
 
 // ── 流消费者 ──
 
 function createAgentStreamConsumer(provider, resp) {
   if (provider.name === "qwen") {
+    // 渐进式流消费（Qwen 不需要 messageId，会话由 chat_id 维护）
+    const pending = [];
+    let done = false;
+    let error = null;
+
+    // 在后台消费流，边收边填充 pending
+    const consumePromise = consumeQwenStream(resp.body, (delta) => {
+      pending.push({ type: delta.kind, text: delta.text });
+    }).then(() => { done = true; }).catch((err) => { error = err; done = true; });
+
     return {
       async *deltas() {
-        const pending = [];
-        await consumeQwenStream(resp.body, (delta) => { pending.push({ type: delta.kind, text: delta.text }); });
-        for (const d of pending) yield d;
+        let idx = 0;
+        while (!done || idx < pending.length) {
+          while (idx < pending.length) {
+            yield pending[idx++];
+          }
+          if (done) break;
+          // 让出控制权，等待更多 delta 到达
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        if (error) throw error;
+        await consumePromise;
       },
       get messageId() { return null; }
     };
@@ -170,7 +193,7 @@ export async function* runAgentLoop(userInput, context) {
     yield { type: "info", text: `对话上下文已达 ${Math.round(currentTokens / maxTokens * 100)}% token，正在总结...` };
 
     try {
-      const summaryPrompt = "请用 500 字以内用中文总结以上对话的关键内容、已完成的步骤和当前进度。只输出总结，不要做其他回应。";
+      const summaryPrompt = "请用 1000 字左右的中文总结以上对话的关键内容、已完成的步骤和当前进度。只输出总结，不要做其他回应。";
       const msgs = sessionId
         ? [{ role: "user", content: summaryPrompt }]
         : [...buildMessagesForMain(composite, workingDir), { role: "user", content: summaryPrompt }];
@@ -298,6 +321,9 @@ export async function* runAgentLoop(userInput, context) {
       }
 
       const parsedCalls = parseToolCallsFromText(responseText);
+
+      // 检查是否有工具调用结果需要继续（即使 responseText 为空）
+      // 场景：纯 reasoning 模型可能仅输出 thinking，但仍需处理之前的工具结果
 
       if (parsedCalls.length > 0) {
         composite._turnStartIdx = composite.messages.length;

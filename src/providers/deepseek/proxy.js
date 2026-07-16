@@ -35,7 +35,14 @@ async function performRequest({ account, method, path, query, body, headers }) {
 
 async function maybeRefreshAccount(response, account) {
   const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("text/event-stream")) return { refreshedAccount: account, response };
+  // SSE 流：直接放行（调用方消费流）
+  if (contentType.includes("text/event-stream")) {
+    // 仍需验证 body 可读（clone 避免消费原始流）
+    if (!response.body) {
+      throw new Error("DeepSeek 返回空响应体");
+    }
+    return { refreshedAccount: account, response };
+  }
   const buffer = Buffer.from(await response.arrayBuffer());
   const payloadText = buffer.toString("utf8").trim();
 

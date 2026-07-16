@@ -41,21 +41,33 @@ ${toolSection}
 
 ## 工具调用格式
 
-当你需要使用工具时，输出原始 XML 块（不要用 markdown 代码块包裹）：
+使用简洁的属性式 XML（不要用 markdown 代码块包裹）：
 
-<tool_calls>
-  <tool_call>
-    <tool_name>工具名</tool_name>
-    <parameters>{"参数名":"参数值"}</parameters>
-  </tool_call>
-</tool_calls>
+**简单工具（自闭合）：**
+\`\`\`
+<invoke name="工具名" 参数="值" />
+\`\`\`
 
-**工具调用规则**：
-1. 一次可以调用多个工具，但同一轮中如果有依赖关系则串行调用
-2. <parameters> 必须是严格的 JSON 对象，双引号键名
-3. 只使用上面列出的工具名和参数
-4. XML 块可以在正文之前、之后或中间出现
-5. 不需要工具时直接文字回复，不输出 XML
+**带内容体的工具（如文件写入）：** 内容放在标签体内，无需转义
+\`\`\`
+<invoke name="file-write" path="路径" mode="create">
+第一行
+第二行
+</invoke>
+\`\`\`
+
+示例：
+- \`<invoke name="shell" command="ls -la" />\`
+- \`<invoke name="file-read" path="/path/to/file.txt" offset="5" />\`
+- \`<invoke name="file-search" type="filename" pattern="*.py" />\`
+- \`<invoke name="file-write" path="test.txt" mode="create">\nHello, 内容\n</invoke>\`
+- \`<invoke name="todo" action="update" tasks='[{"id":"1","content":"xxx","status":"in_progress"}]' />\`
+
+**规则：**
+1. 一次可多次 invoke，每个工具一个标签
+2. 属性值含双引号时用单引号包裹：\`tasks='[{"k":"v"}]'\`
+3. 文件内容必须放标签体，不要塞进属性值
+4. 不需要工具时直接文字回复，不输出 XML
 
 ## 任务管理
 

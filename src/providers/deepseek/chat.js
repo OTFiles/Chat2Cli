@@ -58,8 +58,8 @@ export function streamDeltasWithMessageId(response) {
     }
     if (event !== "message") return;
     try {
-      const delta = deltaDecoder.consume(data);
-      if (delta) pending.push(delta);
+      const deltas = deltaDecoder.consume(data);
+      if (deltas && deltas.length > 0) pending.push(...deltas);
     } catch { /* skip */ }
   });
 

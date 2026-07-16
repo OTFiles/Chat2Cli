@@ -549,6 +549,27 @@ export class QwenProvider extends BaseProvider {
       }
     );
 
+    // 验证响应状态
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      await deleteChatSession(account.token, chatId).catch(() => {});
+      const err = new Error(`Qwen 请求失败 HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+      err.status = resp.status;
+      err._sessionId = chatId;
+      throw err;
+    }
+
+    // 验证返回的是 SSE 流
+    const contentType = resp.headers.get("content-type") || "";
+    if (!contentType.includes("text/event-stream")) {
+      const fullBody = await resp.text().catch(() => "<read failed>");
+      await deleteChatSession(account.token, chatId).catch(() => {});
+      const err = new Error(`Qwen 请求错误 (非 SSE 响应): ${fullBody.slice(0, 150)}`);
+      err.status = resp.status;
+      err._sessionId = chatId;
+      throw err;
+    }
+
     // Agent 循环用：附加 sessionId 供后续续聊
     resp._sessionId = chatId;
     return resp;
