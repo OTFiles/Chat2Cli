@@ -5,6 +5,7 @@ import { getConfig } from "./config.js";
 import {
   streamOpenAiResponse, collectOpenAiResponse,
   streamQwenOpenAiResponse, collectQwenOpenAiResponse,
+  streamGlmOpenAiResponse, collectGlmOpenAiResponse,
   buildOpenAiPrompt
 } from "./bridge.js";
 
@@ -209,22 +210,47 @@ async function handleChatCompletions(req, res) {
       return;
     }
 
-    const isQwen = provider.name === "qwen";
+    const providerName = provider.name;
     if (!result || !result.ok) {
       return sendError(res, 502, `${provider.label} 请求失败`);
     }
 
+    // GLM 会话清理所需变量
+    let glmConversationId = "";
+
     if (streaming) {
-      if (isQwen) {
+      if (providerName === "qwen") {
         await streamQwenOpenAiResponse({ bodyStream: result.body, model, response: res, toolNames });
+      } else if (providerName === "glm") {
+        await streamGlmOpenAiResponse({
+          bodyStream: result.body,
+          model,
+          response: res,
+          toolNames,
+          onConversationId: (convId) => { glmConversationId = convId; },
+        });
       } else {
         await streamOpenAiResponse({ bodyStream: result.body, model, response: res, toolNames });
       }
     } else {
-      const collected = isQwen
-        ? await collectQwenOpenAiResponse({ bodyStream: result.body, model, toolNames })
-        : await collectOpenAiResponse({ bodyStream: result.body, model, toolNames });
+      let collected;
+      if (providerName === "qwen") {
+        collected = await collectQwenOpenAiResponse({ bodyStream: result.body, model, toolNames });
+      } else if (providerName === "glm") {
+        collected = await collectGlmOpenAiResponse({ bodyStream: result.body, model, toolNames });
+      } else {
+        collected = await collectOpenAiResponse({ bodyStream: result.body, model, toolNames });
+      }
       sendJson(res, 200, collected);
+    }
+
+    // GLM 会话清理
+    if (providerName === "glm" && result._provider && glmConversationId) {
+      result._provider._deleteConversation(
+        result._account,
+        glmConversationId,
+        result._assistantId
+      ).catch(() => {});
     }
   } catch (err) {
     if (!res.headersSent) {
@@ -244,8 +270,8 @@ async function handleImagesGenerations(req, res) {
   if (!resolved) return sendError(res, 401, "无效的 API Key");
   const { provider, accountId } = resolved;
 
-  if (provider.name !== "qwen") {
-    return sendError(res, 400, "图片生成仅支持 Qwen 服务商");
+  if (provider.name !== "qwen" && provider.name !== "glm") {
+    return sendError(res, 400, "图片生成仅支持 Qwen / GLM 服务商");
   }
 
   let body;
@@ -254,19 +280,43 @@ async function handleImagesGenerations(req, res) {
   if (!body.prompt) return sendError(res, 400, "缺少 prompt 参数");
 
   try {
-    const result = await provider.generateImage({
-      model: body.model,
-      prompt: body.prompt,
-      size: normalizeSize(body.size),
-      chatType: "t2i",
-      accountId,
-    });
+    let result;
+    if (provider.name === "glm") {
+      result = await provider.generateImage({
+        model: body.model,
+        prompt: body.prompt,
+        size: body.size,
+        style: body.style,
+        n: body.n,
+        accountId,
+      });
+    } else {
+      result = await provider.generateImage({
+        model: body.model,
+        prompt: body.prompt,
+        size: normalizeSize(body.size),
+        chatType: "t2i",
+        accountId,
+      });
+    }
+
+    // GLM 返回 { urls: [...] }，Qwen 返回 { url: "..." }
+    const urls = result.urls || (result.url ? [result.url] : []);
+    if (urls.length === 0) {
+      return sendError(res, 500, "图片生成完成但未返回 URL");
+    }
 
     if (body.response_format === "b64_json") {
-      const b64 = await downloadAsBase64(result.url);
-      sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data: [{ b64_json: b64 }] });
+      const data = await Promise.all(urls.map(async (url) => {
+        const b64 = await downloadAsBase64(url);
+        return { b64_json: b64 };
+      }));
+      sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data });
     } else {
-      sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data: [{ url: result.url }] });
+      sendJson(res, 200, {
+        created: Math.floor(Date.now() / 1000),
+        data: urls.map((url) => ({ url }))
+      });
     }
   } catch (err) {
     sendError(res, 500, err.message);

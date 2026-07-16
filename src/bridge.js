@@ -1028,3 +1028,228 @@ export async function collectQwenOpenAiResponse({ bodyStream, model, toolNames =
     }]
   };
 }
+
+// ═══════════════════════════════════════════════════
+//  GLM SSE 解码器和流消费
+//  GLM SSE 格式：每行 data: 后是完整 JSON 对象
+//  {"status":"streaming","parts":[{"content":[{"type":"think","think":"..."},{"type":"text","text":"..."}]}]}
+// ═══════════════════════════════════════════════════
+
+/**
+ * GLM SSE delta 解码器。
+ * 解析 GLM parts[].content[] 中的 think / text / code 条目。
+ * 返回 Array<{kind: string, text: string}>。
+ */
+export function createGlmDeltaDecoder() {
+  return {
+    consume(payloadText) {
+      try {
+        const payload = JSON.parse(payloadText);
+        const results = [];
+
+        if (!payload || typeof payload !== "object") return results;
+
+        const parts = payload.parts;
+        if (!Array.isArray(parts)) return results;
+
+        for (const part of parts) {
+          if (!part || typeof part !== "object") continue;
+          const contentItems = part.content;
+          if (!Array.isArray(contentItems)) continue;
+
+          for (const item of contentItems) {
+            if (!item || typeof item !== "object") continue;
+
+            if (item.type === "think") {
+              const text = String(item.think || item.text || item.content || "");
+              if (text) results.push({ kind: "thinking", text });
+            } else if (item.type === "text") {
+              const text = String(item.text || item.content || "");
+              if (text) results.push({ kind: "response", text });
+            } else if (item.type === "code") {
+              const code = String(item.code || "");
+              if (code) results.push({ kind: "response", text: "```python\n" + code + "\n```" });
+            } else if (item.type === "execution_output") {
+              const output = String(item.content || "");
+              if (output) results.push({ kind: "response", text: output });
+            }
+          }
+        }
+
+        return results;
+      } catch {
+        return [];
+      }
+    }
+  };
+}
+
+/**
+ * 消费 GLM 的 SSE 流，调用 onDelta 回调处理每个 {kind, text} delta。
+ * options.onConversationId(convId) — 提取到会话 ID 时回调
+ */
+export async function consumeGlmStream(bodyStream, onDelta, options = {}) {
+  if (!bodyStream) return;
+
+  const decoder = new TextDecoder();
+  const deltaDecoder = createGlmDeltaDecoder();
+  const onConversationId = options.onConversationId;
+  let convIdReported = false;
+
+  const parser = createSseParser(({ data }) => {
+    if (!data) return;
+
+    // 提取 conversation_id
+    if (!convIdReported && onConversationId) {
+      try {
+        const raw = JSON.parse(data);
+        if (raw && raw.conversation_id) {
+          convIdReported = true;
+          onConversationId(String(raw.conversation_id));
+        }
+      } catch {}
+    }
+
+    const deltas = deltaDecoder.consume(data);
+    if (!deltas || deltas.length === 0) return;
+
+    for (const d of deltas) {
+      onDelta(d);
+    }
+  });
+
+  for await (const chunk of bodyStream) {
+    parser.push(decoder.decode(chunk, { stream: true }));
+  }
+  parser.flush();
+}
+
+// ── GLM OpenAI 兼容 SSE 响应 ──
+
+export async function streamGlmOpenAiResponse({ bodyStream, model, response, toolNames = [], onConversationId }) {
+  const completionId = createCompletionId();
+  const hasTools = toolNames.length > 0;
+  const toolSieve = hasTools ? createToolSieve(toolNames) : null;
+  let toolCallIndex = 0;
+  let sawToolCall = false;
+
+  response.writeHead(200, {
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "content-type": "text/event-stream; charset=utf-8",
+    "x-accel-buffering": "no"
+  });
+  response.flushHeaders?.();
+
+  function writeSse(payload) {
+    response.write(`data: ${JSON.stringify(payload)}\n\n`);
+  }
+
+  // 第一个 chunk: role
+  writeSse(buildChunkPayload(completionId, model, { role: "assistant" }));
+
+  const emitToolCalls = (calls) => {
+    if (!calls.length) return;
+    sawToolCall = true;
+    writeSse(buildChunkPayload(completionId, model, {
+      tool_calls: createChatToolCalls(calls, toolCallIndex)
+    }));
+    toolCallIndex += calls.length;
+  };
+
+  await consumeGlmStream(bodyStream, (delta) => {
+    if (delta.kind === "thinking") {
+      writeSse(buildChunkPayload(completionId, model, { reasoning_content: delta.text }));
+      return;
+    }
+
+    if (!toolSieve) {
+      writeSse(buildChunkPayload(completionId, model, { content: delta.text }));
+      return;
+    }
+
+    const events = toolSieve.push(delta.text);
+    for (const event of events) {
+      if (event.type === "tool_calls") {
+        emitToolCalls(event.calls ?? []);
+      } else if (event.text) {
+        writeSse(buildChunkPayload(completionId, model, { content: event.text }));
+      }
+    }
+  }, { onConversationId });
+
+  if (toolSieve) {
+    const tailEvents = toolSieve.flush();
+    for (const event of tailEvents) {
+      if (event.type === "tool_calls") {
+        emitToolCalls(event.calls ?? []);
+      } else if (event.text) {
+        writeSse(buildChunkPayload(completionId, model, { content: event.text }));
+      }
+    }
+  }
+
+  writeSse(buildChunkPayload(completionId, model, {}, sawToolCall ? "tool_calls" : "stop"));
+  response.end("data: [DONE]\n\n");
+}
+
+export async function collectGlmOpenAiResponse({ bodyStream, model, toolNames = [] }) {
+  let reasoningContent = "";
+  let rawContent = "";
+
+  await consumeGlmStream(bodyStream, (delta) => {
+    if (delta.kind === "thinking") {
+      reasoningContent += delta.text;
+    } else {
+      rawContent += delta.text;
+    }
+  });
+
+  const hasTools = toolNames.length > 0;
+  let content = rawContent;
+  let toolCalls = [];
+
+  if (hasTools) {
+    const parsed = extractToolAwareOutput(rawContent, toolNames);
+    content = parsed.content;
+    toolCalls = parsed.toolCalls;
+  }
+
+  const message = {
+    role: "assistant",
+    content: content.length ? content : null
+  };
+  if (reasoningContent) {
+    message.reasoning_content = reasoningContent;
+  }
+
+  if (toolCalls.length > 0) {
+    return {
+      id: createCompletionId(),
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{
+        index: 0,
+        finish_reason: "tool_calls",
+        message: {
+          ...message,
+          content: content.length ? content : null,
+          tool_calls: createChatToolCalls(toolCalls)
+        }
+      }]
+    };
+  }
+
+  return {
+    id: createCompletionId(),
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{
+      index: 0,
+      finish_reason: "stop",
+      message
+    }]
+  };
+}

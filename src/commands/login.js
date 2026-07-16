@@ -215,6 +215,92 @@ async function loginQwen(provider) {
   }
 }
 
+async function loginGlm(provider) {
+  // 显示已有账号
+  const existing = provider.listAccounts();
+  if (existing.length > 0) {
+    printInfo(`当前已有 ${chalk.bold(existing.length)} 个 GLM 账号:`);
+    for (const a of existing) {
+      const tag = a.isGuest ? chalk.cyan("[游客]") : "";
+      process.stdout.write(chalk.gray(`  - ${accountLabel(a)} ${tag}\n`));
+    }
+    process.stdout.write("\n");
+
+    const { default: inquirer } = await import("inquirer");
+    const { action } = await inquirer.prompt([{
+      type: "list",
+      name: "action",
+      message: "选择操作:",
+      choices: [
+        { name: "添加新账号", value: "add" },
+        { name: "删除已有账号", value: "delete" },
+        { name: "取消", value: "cancel" }
+      ]
+    }]);
+    if (action === "cancel") return;
+    if (action === "delete") {
+      await interactiveDeleteAccount(provider);
+      return;
+    }
+  }
+
+  // 选择登录方式
+  process.stdout.write(chalk.gray("如何获取 GLM Refresh Token:\n"));
+  process.stdout.write(chalk.gray("  1. 浏览器打开 https://chatglm.cn 并登录\n"));
+  process.stdout.write(chalk.gray("  2. 打开开发者工具 (F12) → Application → Local Storage\n"));
+  process.stdout.write(chalk.gray("  3. 找到 key 为 'chatglm_refresh_token' 的项\n\n"));
+
+  const { loginType } = await inquirer.prompt([{
+    type: "list",
+    name: "loginType",
+    message: "选择登录方式:",
+    choices: [
+      { name: "输入 Refresh Token（推荐，功能完整）", value: "token" },
+      { name: "游客模式（无需账号，能力受限）", value: "guest" },
+    ]
+  }]);
+
+  if (loginType === "guest") {
+    const spinner = ora("正在获取 GLM 游客 token...").start();
+    try {
+      const account = await provider.login({ guest: true });
+      spinner.succeed("游客模式已就绪");
+
+      const total = provider.listAccounts().length;
+      printSuccess(`已启用游客模式 (共 ${total} 个账号)`);
+      autoSwitchProvider(provider.name);
+    } catch (err) {
+      spinner.fail("游客模式启用失败");
+      printError(err.message);
+    }
+    return;
+  }
+
+  // Refresh Token 登录
+  const answers = await inquirer.prompt([
+    {
+      type: "password",
+      name: "refreshToken",
+      message: "Refresh Token:",
+      mask: "*",
+      validate: (v) => v.trim().length > 0 ? true : "Token 不能为空"
+    }
+  ]);
+
+  const spinner = ora("正在验证 GLM Refresh Token...").start();
+  try {
+    const account = await provider.login(answers);
+    spinner.succeed("登录成功");
+
+    const total = provider.listAccounts().length;
+    printSuccess(`已登录: 智谱清言账号 (共 ${total} 个账号)`);
+    autoSwitchProvider(provider.name);
+  } catch (err) {
+    spinner.fail("登录失败");
+    printError(err.message);
+  }
+}
+
 async function loginOpenAI(provider) {
   const existing = provider.getAccountInfo();
   if (existing?.apiKey) {
@@ -297,6 +383,8 @@ export async function runLogin() {
     await loginOpenAI(provider);
   } else if (providerName === "qwen") {
     await loginQwen(provider);
+  } else if (providerName === "glm") {
+    await loginGlm(provider);
   } else {
     printError(`未知的服务商: ${providerName}`);
   }

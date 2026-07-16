@@ -104,6 +104,9 @@ async function createKey() {
   if (state.providers?.qwen?.accounts?.length > 0) {
     providerNames.push({ name: "Qwen (通义千问)", value: "qwen" });
   }
+  if (state.providers?.glm?.accounts?.length > 0) {
+    providerNames.push({ name: "GLM (智谱清言)", value: "glm" });
+  }
 
   if (!providerNames.length) {
     printError("没有已登录的服务商，请先运行 chat2cli login");
@@ -140,7 +143,7 @@ async function createKey() {
   let accountId = null;
 
   if (answers.bindNow) {
-    if (answers.provider === "deepseek" || answers.provider === "qwen") {
+    if (answers.provider === "deepseek" || answers.provider === "qwen" || answers.provider === "glm") {
       const accounts = getAvailableAccounts().filter((a) => a.provider === answers.provider);
       if (accounts.length === 0) {
         printWarn(`没有可用的 ${answers.provider} 账号（请先登录）`);

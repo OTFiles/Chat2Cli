@@ -1,6 +1,7 @@
 import { DeepSeekProvider } from "./deepseek/index.js";
 import { OpenAIProvider } from "./openai/index.js";
 import { QwenProvider } from "./qwen/index.js";
+import { GlmProvider } from "./glm/index.js";
 
 const registry = new Map();
 
@@ -14,6 +15,7 @@ export function initProviders() {
   registerProvider(DeepSeekProvider);
   registerProvider(OpenAIProvider);
   registerProvider(QwenProvider);
+  registerProvider(GlmProvider);
 }
 
 export function getProvider(name) {
