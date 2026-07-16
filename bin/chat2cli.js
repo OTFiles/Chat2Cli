@@ -95,6 +95,11 @@ ${chalk.dim("DeepSeek 云端会话:")}
   ${chalk.cyan("history ds-clear")}        删除全部云端会话
   ${chalk.cyan("history ds-search <关键词>")}  搜索云端会话内容
 
+${chalk.dim("Qwen 云端会话:")}
+  ${chalk.cyan("history qw")}             获取 Qwen 账号的云端会话列表
+  ${chalk.cyan("history qw-continue <id>")} 继续云端会话
+  ${chalk.cyan("history qw-delete <id>")}   删除云端会话
+
 ${chalk.dim("批量操作:")}
   ${chalk.cyan("history batch-local")}     多选删除本地对话
   ${chalk.cyan("history batch-ds")}        多选删除云端会话
@@ -166,7 +171,9 @@ ${chalk.dim("说明:")}
 
 ${chalk.dim("端点:")}
   ${chalk.cyan("GET  /v1/models")}              列出可用模型
-  ${chalk.cyan("POST /v1/chat/completions")}    发送对话请求
+  ${chalk.cyan("POST /v1/chat/completions")}    发送对话请求（含图片生成模型）
+  ${chalk.cyan("POST /v1/images/generations")}  图片生成（OpenAI 兼容）
+  ${chalk.cyan("POST /v1/images/edits")}        图片编辑（OpenAI 兼容）
 
 ${chalk.dim("认证:")}
   需在 Authorization 头中提供 Bearer API Key

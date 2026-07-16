@@ -7,6 +7,60 @@ import { executeToolCall, TOOL_DEFINITIONS } from "./tools/registry.js";
 import { buildMainSystemPrompt } from "./prompts/main-system.js";
 import { buildAuxSystemPrompt } from "./prompts/aux-system.js";
 import { appendMessage, updateTaskList, saveComposite } from "./storage/composite.js";
+import { existsSync, mkdirSync, createWriteStream } from "node:fs";
+import { join, extname } from "node:path";
+import { createHash } from "node:crypto";
+
+// ═══════════════════════════════════════════════
+//  图片生成结果处理（agent 模式）
+// ═══════════════════════════════════════════════
+
+const GENERATED_DIR = "generated";
+
+/**
+ * 下载图片到 workingDir/generated/ 目录
+ * @returns {Promise<string>} 本地文件路径
+ */
+async function downloadImageToDir(url, workingDir) {
+  const dir = join(workingDir, GENERATED_DIR);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`下载图片失败 HTTP ${resp.status}`);
+
+  const mime = resp.headers.get("content-type") || "image/png";
+  const extMap = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif" };
+  const ext = extMap[mime] || extname(url) || ".png";
+
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const filename = `image_${ts}${ext}`;
+  const filepath = join(dir, filename);
+
+  const buf = Buffer.from(await resp.arrayBuffer());
+  const ws = createWriteStream(filepath);
+  await new Promise((resolve, reject) => {
+    ws.on("finish", resolve);
+    ws.on("error", reject);
+    ws.end(buf);
+  });
+
+  return filepath;
+}
+
+/**
+ * 处理图片生成结果：下载到本地并产出相关 yield 事件
+ */
+async function* handleImageResult(resp, workingDir, role) {
+  try {
+    const filepath = await downloadImageToDir(resp.url, workingDir);
+    const relPath = `${GENERATED_DIR}/${filepath.split("/").pop()}`;
+    const text = `已生成图片，保存至 ${relPath}（原始URL: ${resp.url}）`;
+    yield { type: "info", text, source: role };
+  } catch (err) {
+    // 下载失败时至少返回原始 URL
+    yield { type: "info", text: `已生成图片: ${resp.url}（自动下载失败: ${err.message}）`, source: role };
+  }
+}
 
 // ═══════════════════════════════════════════════
 //  Token 计数
@@ -275,6 +329,19 @@ export async function* runAgentLoop(userInput, context) {
     try {
       const resp = await mainProvider.startCompletion(messages, providerOpts);
 
+      // 图片/视频生成结果（非 Response 流）
+      if (resp && resp._isImageResult) {
+        for await (const event of handleImageResult(resp, workingDir, "main")) {
+          yield event;
+        }
+        appendMessage(composite, {
+          role: "assistant", content: `[图片生成] ${resp.url}`,
+          source: "main"
+        });
+        yield { type: "done", text: resp.url };
+        return;
+      }
+
       if (!resp || !resp.ok) {
         yield { type: "error", text: `${mainProvider.label} 请求失败 (HTTP ${resp?.status || "?"})` };
         return;
@@ -401,6 +468,20 @@ export async function* runAuxCall(userInput, context) {
     const resp = await auxProvider.startCompletion(messages, {
       prompt, model: context.auxModel, accountId: composite.aux.accountId
     });
+
+    // 图片/视频生成结果（非 Response 流）
+    if (resp && resp._isImageResult) {
+      for await (const event of handleImageResult(resp, workingDir, "aux")) {
+        yield event;
+      }
+      appendMessage(composite, {
+        role: "assistant", content: `[图片生成] ${resp.url}`,
+        source: "aux"
+      });
+      yield { type: "done", text: resp.url, source: "aux" };
+      return;
+    }
+
     if (!resp || !resp.ok) {
       yield { type: "error", text: `辅助 AI (${auxProvider.label}) 请求失败` };
       return;

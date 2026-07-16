@@ -15,6 +15,9 @@ let QWEN_MODELS = [
   { id: "qwen3.5-flash", label: "Qwen 3.5 Flash" },
 ];
 
+// ── 能力后缀常量 ──
+const CAPABILITY_SUFFIXES = ["-thinking-search", "-image-edit", "-deep-research", "-thinking", "-search", "-video", "-image"];
+
 function genRequestId() {
   return randomUUID();
 }
@@ -43,6 +46,55 @@ function buildHeaders(token) {
   };
 }
 
+// ═══════════════════════════════════════════════════
+//  模型名解析（拆分基础模型 + 能力后缀）
+// ═══════════════════════════════════════════════════
+
+function splitModelSuffix(modelId) {
+  const name = String(modelId || "");
+  for (const suffix of CAPABILITY_SUFFIXES) {
+    if (name.endsWith(suffix)) {
+      return { baseModel: name.slice(0, -suffix.length), suffix };
+    }
+  }
+  return { baseModel: name, suffix: "" };
+}
+
+/**
+ * 从模型后缀确定 chat_type
+ *  -image → t2i
+ *  -video → t2v
+ *  -image-edit → image_edit
+ *  -search → search
+ *  其他 → t2t
+ */
+function resolveChatType(modelId) {
+  if (!modelId) return "t2t";
+  if (modelId.includes("-image-edit")) return "image_edit";
+  if (modelId.includes("-video")) return "t2v";
+  if (modelId.includes("-image")) return "t2i";
+  if (modelId.includes("-search")) return "search";
+  return "t2t";
+}
+
+/** 返回 strip 后缀后的上游模型 ID */
+function resolveUpstreamModelId(modelId, cachedModels) {
+  if (!modelId) return modelId;
+  const { baseModel } = splitModelSuffix(modelId);
+  // 尝试在缓存中匹配
+  const models = cachedModels || QWEN_MODELS;
+  const match = models.find(m => {
+    const normalized = String(m.id || "").trim().toLowerCase();
+    return normalized === baseModel.trim().toLowerCase()
+      || normalized === modelId.trim().toLowerCase();
+  });
+  return match?.id || baseModel;
+}
+
+// ═══════════════════════════════════════════════════
+//  会话管理
+// ═══════════════════════════════════════════════════
+
 /** 创建 Qwen 会话 */
 async function createChatSession(token, model, chatType = "t2t") {
   const ts = Math.floor(Date.now() / 1000);
@@ -63,7 +115,10 @@ async function createChatSession(token, model, chatType = "t2t") {
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
     if (resp.status === 401 || resp.status === 403) {
-      throw new Error("Qwen token 已失效，请重新登录");
+      const err = new Error("Qwen token 已失效");
+      err.status = resp.status;
+      err._tokenExpired = true;
+      throw err;
     }
     throw new Error(`创建 Qwen 会话失败 HTTP ${resp.status}: ${text.slice(0, 200)}`);
   }
@@ -89,27 +144,39 @@ async function deleteChatSession(token, chatId) {
   }
 }
 
+// ═══════════════════════════════════════════════════
+//  Payload 构建
+// ═══════════════════════════════════════════════════
+
+/** 从 options 中解析搜索/思考开关 */
+function resolveThinkingSearch(options, modelId) {
+  const thinkingEnabled = options.thinkingEnabled !== false
+    && !(modelId || "").includes("-thinking");
+  const thinkingEnabledBySuffix = (modelId || "").includes("-thinking");
+  const finalThinking = thinkingEnabledBySuffix || thinkingEnabled;
+
+  const searchEnabled = options.enableSearch === true
+    || (modelId || "").includes("-search");
+
+  return { finalThinking, searchEnabled };
+}
+
 /** 构建 Qwen 聊天请求 payload */
 function buildQwenPayload(chatId, model, prompt, options = {}) {
   const ts = Math.floor(Date.now() / 1000);
   const fid = genFid();
   const childId = genFid();
 
-  const thinkingEnabled = options.thinkingEnabled !== false;
-  const enableSearch = options.enableSearch === true;
-
-  const thinking = thinkingEnabled;
-  const autoThinking = thinkingEnabled;
-  const thinkingMode = thinkingEnabled ? "Auto" : "Disabled";
+  const { finalThinking, searchEnabled } = resolveThinkingSearch(options, model);
 
   const featureConfig = {
-    thinking_enabled: thinking,
+    thinking_enabled: finalThinking,
     output_schema: "phase",
     research_mode: "normal",
-    auto_thinking: autoThinking,
-    thinking_mode: thinkingMode,
+    auto_thinking: finalThinking,
+    thinking_mode: finalThinking ? "Auto" : "Disabled",
     thinking_format: "summary",
-    auto_search: enableSearch,
+    auto_search: searchEnabled,
     code_interpreter: false,
     plugins_enabled: false,
     function_calling: false,
@@ -148,12 +215,210 @@ function buildQwenPayload(chatId, model, prompt, options = {}) {
   };
 }
 
+// ═══════════════════════════════════════════════════
+//  图片/视频生成
+// ═══════════════════════════════════════════════════
+
 /**
- * 解析 Qwen SSE 数据行，提取 thinking / response delta
- * 参照 qwen2API ParseQwenEvent() 支持多种响应格式
- * @returns {Array<{kind: string, text: string}>|null}
+ * 从 SSE 响应中提取图片/视频 URL
+ * 参照 Qwen2API chat.image.video.js
  */
-/** 将 extra 中的 summary_title / summary_thought 的 content 数组展开为 thinking 文本 */
+function extractResourceUrlFromText(text) {
+  if (!text) return null;
+  // Markdown 图片
+  const mdMatch = text.match(/!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/i);
+  if (mdMatch) return mdMatch[1];
+  // 普通 URL
+  const urlMatch = text.match(/https?:\/\/[^\s<>"')\]]+/i);
+  return urlMatch ? urlMatch[0] : null;
+}
+
+function extractResourceUrlFromPayload(payload) {
+  if (!payload) return null;
+  if (typeof payload === "string") {
+    try {
+      return extractResourceUrlFromPayload(JSON.parse(payload));
+    } catch {
+      return extractResourceUrlFromText(payload);
+    }
+  }
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const url = extractResourceUrlFromPayload(item);
+      if (url) return url;
+    }
+    return null;
+  }
+  if (typeof payload !== "object") return null;
+
+  // 直接候选字段
+  for (const key of ["content", "url", "image", "video", "video_url", "download_url", "file_url", "resource_url", "output_url", "result_url"]) {
+    const url = extractResourceUrlFromPayload(payload[key]);
+    if (url) return url;
+  }
+  // extra.image_list
+  const imageList = payload?.extra?.image_list;
+  if (Array.isArray(imageList)) {
+    for (const img of imageList) {
+      if (img?.image) return img.image;
+    }
+  }
+  // 递归嵌套
+  for (const key of ["data", "message", "delta", "extra", "choices", "output", "result", "urls"]) {
+    const url = extractResourceUrlFromPayload(payload[key]);
+    if (url) return url;
+  }
+  return null;
+}
+
+/**
+ * 从 SSE 流中收集完整文本并提取资源 URL
+ */
+async function collectStreamResult(bodyStream) {
+  const decoder = new TextDecoder();
+  const reader = bodyStream.getReader();
+  let buffer = "";
+  let fullText = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const data = trimmed.slice(5).trimStart();
+        if (!data || data === "[DONE]") continue;
+
+        fullText += data + "\n";
+
+        // 边收边解析，尽早拿到 URL
+        try {
+          const url = extractResourceUrlFromPayload(JSON.parse(data));
+          if (url) return { url, fullText, contentType: "image" };
+        } catch {}
+      }
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+
+  // 最后整体解析
+  const url = extractResourceUrlFromPayload(fullText) || extractResourceUrlFromText(fullText);
+  return { url, fullText, contentType: "image" };
+}
+
+/**
+ * 发送图片/视频生成请求
+ * 参照 Qwen2API generateImageVideoResult()
+ */
+async function generateImageVideo(account, model, prompt, options = {}) {
+  const token = account.token;
+  const chatType = options.chatType || resolveChatType(model);
+  const upstreamModel = resolveUpstreamModelId(model, null);
+
+  // 创建会话（图片/视频生成有不同的 chat_type）
+  const chatId = await createChatSession(token, upstreamModel, chatType);
+
+  const messages = [{
+    role: "user",
+    content: prompt,
+    chat_type: chatType,
+    feature_config: { output_schema: "phase" },
+  }];
+
+  // 处理图片编辑的文件
+  if (chatType === "image_edit" && options.files && options.files.length > 0) {
+    messages[0].files = options.files.map(f => ({
+      type: "image",
+      url: f.url || f.image || f,
+    }));
+  } else {
+    messages[0].files = [];
+  }
+
+  // 非流式（图片/视频生成上游可能不支持 stream=true）
+  const payload = {
+    stream: chatType === "t2i" || chatType === "image_edit",
+    version: "2.1",
+    incremental_output: true,
+    chat_id: chatId,
+    model: upstreamModel,
+    messages,
+  };
+
+  // 尺寸参数
+  if (options.size && (chatType === "t2i" || chatType === "t2v")) {
+    payload.size = options.size;
+  }
+
+  const headers = buildHeaders(token);
+  headers.Accept = payload.stream ? "text/event-stream" : "application/json";
+
+  const resp = await fetch(
+    `${QWEN_BASE_URL}/api/v2/chat/completions?chat_id=${chatId}`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    }
+  );
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    await deleteChatSession(token, chatId).catch(() => {});
+    if (resp.status === 401 || resp.status === 403) {
+      const err = new Error("Qwen token 已失效");
+      err.status = resp.status;
+      err._tokenExpired = true;
+      throw err;
+    }
+    throw new Error(`Qwen 图片/视频生成失败 HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+  }
+
+  // 如果是 stream，从 SSE 中提取 URL
+  if (payload.stream) {
+    const result = await collectStreamResult(resp.body);
+    if (result.url) {
+      return { url: result.url, chatType, chatId };
+    }
+
+    // 流中没有拿到 URL，尝试从会话详情获取
+    if (chatId) {
+      for (let i = 0; i < 3; i++) {
+        await new Promise(r => setTimeout(r, 800));
+        try {
+          const detailResp = await fetch(`${QWEN_BASE_URL}/api/v2/chats/${chatId}`, {
+            headers: buildHeaders(token),
+          });
+          if (detailResp.ok) {
+            const detail = await detailResp.json();
+            const url = extractResourceUrlFromPayload(detail);
+            if (url) return { url, chatType, chatId };
+          }
+        } catch {}
+      }
+    }
+
+    throw new Error("上游未返回图片/视频链接");
+  }
+
+  // 非流式：直接从 JSON 提取
+  const json = await resp.json();
+  const url = extractResourceUrlFromPayload(json);
+  if (!url) throw new Error("上游未返回图片/视频链接");
+  return { url, chatType, chatId };
+}
+
+// ═══════════════════════════════════════════════════
+//  SSE 解析
+// ═══════════════════════════════════════════════════
+
 function extractSummaryThinking(extra) {
   if (!extra) return "";
   const parts = [];
@@ -177,22 +442,18 @@ function parseQwenSseData(jsonStr) {
     const obj = JSON.parse(jsonStr);
     const events = [];
 
-    // 跳过 response.created 等元数据事件
     if (obj["response.created"]) return null;
 
-    // 1. 处理 choices[0].delta
     const choice = obj?.choices?.[0];
     if (choice?.delta) {
       const delta = choice.delta;
       const extra = delta.extra;
 
-      // reasoning 字段（多种变体）
       const reasoning = firstString(delta.reasoning_content, delta.reasoning,
         delta.reasoning_text, delta.thinking, delta.thoughts,
         extra?.reasoning_content, extra?.reasoning,
         extra?.reasoning_text, extra?.thinking, extra?.thoughts);
 
-      // thinking_summary 阶段：extra.summary_title / extra.summary_thought
       const summaryThinking = extractSummaryThinking(extra);
       const allThinking = [reasoning, summaryThinking].filter(Boolean).join("\n");
 
@@ -202,13 +463,11 @@ function parseQwenSseData(jsonStr) {
       if (content) events.push({ kind: "response", text: content });
     }
 
-    // 2. 处理顶层 content/reasoning 字段
     const topReasoning = firstString(obj.reasoning_content, obj.reasoning, obj.thinking);
     const topContent = firstString(obj.content, obj.answer, obj.text, obj.delta);
     if (topReasoning) events.push({ kind: "thinking", text: topReasoning });
     if (topContent) events.push({ kind: "response", text: topContent });
 
-    // 3. 递归解析 data 和 message 子对象
     if (obj.data && typeof obj.data === "object" && !Array.isArray(obj.data)) {
       const subEvents = parseQwenSseData(JSON.stringify(obj.data));
       if (subEvents) events.push(...subEvents);
@@ -224,13 +483,16 @@ function parseQwenSseData(jsonStr) {
   }
 }
 
-/** 返回第一个非空字符串值 */
 function firstString(...values) {
   for (const v of values) {
     if (typeof v === "string" && v.trim() !== "") return v;
   }
   return "";
 }
+
+// ═══════════════════════════════════════════════════
+//  QwenProvider 类
+// ═══════════════════════════════════════════════════
 
 export class QwenProvider extends BaseProvider {
   get name() {
@@ -297,8 +559,74 @@ export class QwenProvider extends BaseProvider {
     };
   }
 
+  /**
+   * 使用存储的邮箱+密码重新获取 token（自动续期）
+   * @returns {object|null} 新的 token 信息，失败返回 null
+   */
+  async _refreshToken(account) {
+    if (!account || !account.email || !account.password) return null;
+
+    try {
+      const result = await this._loginByPassword(account.email, account.password);
+      // 更新存储
+      updateStore((state) => {
+        const providers = { ...state.providers };
+        const accounts = [...(providers.qwen?.accounts || [])];
+        const idx = accounts.findIndex(a => a.id === account.id);
+        if (idx >= 0) {
+          accounts[idx] = {
+            ...accounts[idx],
+            token: result.token,
+            updatedAt: new Date().toISOString(),
+          };
+          providers.qwen = { ...providers.qwen, accounts };
+        }
+        return { ...state, providers };
+      });
+
+      // 更新内存中的 account 引用
+      account.token = result.token;
+      account.updatedAt = new Date().toISOString();
+
+      console.error("[Qwen] Token 自动续期成功:", account.email);
+      return result;
+    } catch (e) {
+      console.error("[Qwen] Token 自动续期失败:", account.email, e.message);
+      return null;
+    }
+  }
+
+  /**
+   * 执行带自动续期的请求
+   * 如果请求因 401/403 失败且账号有密码，自动重登录后重试一次
+   */
+  async _withAutoRefresh(account, fn) {
+    try {
+      return await fn(account.token);
+    } catch (err) {
+      if (err._tokenExpired || err.status === 401 || err.status === 403) {
+        // 尝试自动续期
+        if (account.email && account.password) {
+          console.error("[Qwen] Token 过期，尝试自动续期...");
+          const refreshed = await this._refreshToken(account);
+          if (refreshed) {
+            // 重试请求
+            return await fn(account.token);
+          }
+        }
+        // 无密码或续期失败
+        throw new Error(
+          account.email && account.password
+            ? "Qwen token 已失效，自动续期失败，请重新运行 chat2cli login"
+            : "Qwen token 已失效，且未存储账号密码无法自动续期。请重新运行 chat2cli login 使用邮箱+密码登录"
+        );
+      }
+      throw err;
+    }
+  }
+
   async login(credentials) {
-    let token, email, displayName;
+    let token, email, displayName, password;
 
     // 方式一：直接提供 token
     if (credentials.token) {
@@ -328,6 +656,7 @@ export class QwenProvider extends BaseProvider {
       token = result.token;
       email = result.email;
       displayName = result.name;
+      password = credentials.password; // 存储密码用于自动续期
     }
 
     if (!token) throw new Error("请提供 token 或邮箱+密码");
@@ -339,6 +668,8 @@ export class QwenProvider extends BaseProvider {
       token,
       email,
       displayName,
+      // 存储密码用于自动续期（兼容旧版数据：旧账号没有 password 字段）
+      password: password || undefined,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -347,10 +678,16 @@ export class QwenProvider extends BaseProvider {
       const providers = { ...state.providers };
       if (!providers.qwen) providers.qwen = { accounts: [] };
       const existingIdx = providers.qwen.accounts.findIndex(
-        (a) => a.token === account.token
+        (a) => a.email && a.email === email
       );
       if (existingIdx >= 0) {
-        providers.qwen.accounts[existingIdx] = account;
+        // 保留已有的 password（如果新登录没带密码但旧账号有）
+        const oldAccount = providers.qwen.accounts[existingIdx];
+        providers.qwen.accounts[existingIdx] = {
+          ...account,
+          password: account.password || oldAccount.password,
+          createdAt: oldAccount.createdAt || account.createdAt,
+        };
       } else {
         providers.qwen.accounts.push(account);
       }
@@ -394,16 +731,119 @@ export class QwenProvider extends BaseProvider {
     return !!(info && info.token);
   }
 
+  // ── 会话列表 ──
+
+  /**
+   * 获取当前账号的会话列表
+   * 参照 Qwen2API GET /api/v2/chats
+   * @param {string} [accountId] - 账号 ID，不传则使用默认账号
+   * @returns {Promise<Array<{id, title, createdAt, updatedAt, model, chatType}>>}
+   */
+  async listSessions(accountId) {
+    const account = accountId
+      ? this.getAccountInfo(accountId)
+      : this.getDefaultAccount();
+    if (!account) throw new Error("未登录 Qwen，请先运行 chat2cli login");
+
+    const doFetch = async (token) => {
+      const resp = await fetch(`${QWEN_BASE_URL}/api/v2/chats`, {
+        headers: buildHeaders(token),
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        if (resp.status === 401 || resp.status === 403) {
+          const err = new Error("Qwen token 已失效");
+          err.status = resp.status;
+          err._tokenExpired = true;
+          throw err;
+        }
+        throw new Error(`获取 Qwen 会话列表失败 HTTP ${resp.status}: ${text.slice(0, 200)}`);
+      }
+
+      const data = await resp.json();
+      // 响应格式: { data: { chats: [...] } } 或 { data: [...] }
+      const chats = data?.data?.chats || data?.data || data?.chats || [];
+      if (!Array.isArray(chats)) return [];
+
+      return chats.map(c => ({
+        id: c.id || c.chat_id || "",
+        title: c.title || c.name || "未命名会话",
+        createdAt: c.created_at || c.createdAt || c.timestamp || "",
+        updatedAt: c.updated_at || c.updatedAt || c.last_message_at || "",
+        model: (c.models && c.models[0]) || c.model || "",
+        chatType: c.chat_type || c.chatType || "t2t",
+      }));
+    };
+
+    return await this._withAutoRefresh(account, doFetch);
+  }
+
+  /**
+   * 获取单个会话详情（包含消息历史）
+   * @param {string} chatId - 会话 ID
+   * @param {string} [accountId] - 账号 ID
+   */
+  async getSessionDetail(chatId, accountId) {
+    const account = accountId
+      ? this.getAccountInfo(accountId)
+      : this.getDefaultAccount();
+    if (!account) throw new Error("未登录 Qwen");
+    if (!chatId) throw new Error("缺少 chatId");
+
+    const doFetch = async (token) => {
+      const resp = await fetch(`${QWEN_BASE_URL}/api/v2/chats/${chatId}`, {
+        headers: buildHeaders(token),
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        if (resp.status === 401 || resp.status === 403) {
+          const err = new Error("Qwen token 已失效");
+          err.status = resp.status;
+          err._tokenExpired = true;
+          throw err;
+        }
+        throw new Error(`获取 Qwen 会话详情失败 HTTP ${resp.status}: ${text.slice(0, 200)}`);
+      }
+
+      return await resp.json();
+    };
+
+    return await this._withAutoRefresh(account, doFetch);
+  }
+
+  /**
+   * 删除云端会话（带 token 自动续期）
+   * @param {string} chatId - 会话 ID
+   * @param {string} [accountId] - 账号 ID
+   */
+  async deleteChatSession(chatId, accountId) {
+    const account = accountId
+      ? this.getAccountInfo(accountId)
+      : this.getDefaultAccount();
+    if (!account) throw new Error("未登录 Qwen");
+    if (!chatId) throw new Error("缺少 chatId");
+
+    const doDelete = async (token) => {
+      const resp = await fetch(`${QWEN_BASE_URL}/api/v2/chats/${chatId}`, {
+        method: "DELETE",
+        headers: buildHeaders(token),
+      });
+      if (!resp.ok && resp.status !== 404) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(`删除会话失败 HTTP ${resp.status}: ${text.slice(0, 100)}`);
+      }
+    };
+
+    return await this._withAutoRefresh(account, doDelete);
+  }
+
   // ── models ──
 
-  /** 缓存从 Qwen API 动态拉取的模型列表 */
   _cachedModels = null;
   _modelsLastFetch = 0;
 
-  /**
-   * 从 Qwen API 动态获取真实模型列表（参照 qwen2API /api/models）
-   * 结果缓存 30 分钟。失败时回退到硬编码列表。
-   */
   async _fetchModels(token) {
     const now = Date.now();
     if (this._cachedModels && (now - this._modelsLastFetch) < 30 * 60 * 1000) {
@@ -415,13 +855,40 @@ export class QwenProvider extends BaseProvider {
       });
       if (resp.ok) {
         const raw = await resp.json();
-        // 响应可能是 { data: [...] } 或直接数组
         const list = Array.isArray(raw) ? raw : (raw?.data || raw?.models || []);
         if (Array.isArray(list) && list.length > 0) {
-          const models = list.map(item => ({
-            id: item.id || item.model || item.name || "",
-            label: item.display_name || item.displayName || item.name || item.id || "",
-          })).filter(m => m.id);
+          const models = list.map(item => {
+            const id = item.id || item.model || item.name || "";
+            const label = item.display_name || item.displayName || item.name || item.id || "";
+            const chatTypes = item?.info?.meta?.chat_type || [];
+
+            // 生成能力变体后缀模型
+            const variants = [{ id, label }];
+
+            // 从上游元数据判断图片/视频能力
+            const hasImage = chatTypes.includes("t2i");
+            const hasImageEdit = chatTypes.includes("image_edit");
+            const hasVideo = chatTypes.includes("t2v");
+
+            // 兜底：omni 系列模型硬编码支持图片/视频（上游元数据可能缺失）
+            const isOmni = id.toLowerCase().includes("omni");
+            if (hasImage || isOmni) {
+              variants.push({ id: `${id}-image`, label: `${label} (图片生成)` });
+            }
+            if (hasImageEdit || isOmni) {
+              variants.push({ id: `${id}-image-edit`, label: `${label} (图片编辑)` });
+            }
+            if (hasVideo || isOmni) {
+              variants.push({ id: `${id}-video`, label: `${label} (视频生成)` });
+            }
+            // 所有模型都可加 thinking / search
+            variants.push(
+              { id: `${id}-thinking`, label: `${label} (思考)` },
+              { id: `${id}-search`, label: `${label} (搜索)` },
+              { id: `${id}-thinking-search`, label: `${label} (思考+搜索)` },
+            );
+            return variants;
+          }).flat();
           if (models.length > 0) {
             this._cachedModels = models;
             this._modelsLastFetch = now;
@@ -432,12 +899,10 @@ export class QwenProvider extends BaseProvider {
     } catch (e) {
       console.error("[Qwen] Failed to fetch models:", e.message);
     }
-    // 回退到硬编码列表
     return QWEN_MODELS;
   }
 
   getModels() {
-    // 同步返回：优先用缓存，否则用硬编码（异步版本通过 _fetchModels 获取）
     if (this._cachedModels) return this._cachedModels;
     return QWEN_MODELS;
   }
@@ -448,41 +913,61 @@ export class QwenProvider extends BaseProvider {
     const account = this.getAccountInfo(options.accountId);
     if (!account) throw new Error("未登录 Qwen，请先运行 chat2cli login");
 
-    // 懒拉取真实模型列表，确保模型 ID 有效
     const realModels = await this._fetchModels(account.token);
     const model = options.model || realModels[0]?.id;
+    const chatType = resolveChatType(model);
+    const upstreamModel = resolveUpstreamModelId(model, realModels);
+
+    // 图片/视频生成走专用路径
+    if (chatType === "t2i" || chatType === "t2v" || chatType === "image_edit") {
+      const prompt = buildPromptFromMessages(messages);
+      const result = await this._withAutoRefresh(account, () =>
+        generateImageVideo(account, model, prompt, { chatType, size: options.size })
+      );
+      yield { kind: "response", text: `![image](${result.url})` };
+      return;
+    }
+
     const prompt = buildPromptFromMessages(messages);
 
-    const chatId = await createChatSession(account.token, model);
-    const payload = buildQwenPayload(chatId, model, prompt, options);
+    const doChat = async (token) => {
+      const chatId = await createChatSession(token, upstreamModel, chatType);
+      const payload = buildQwenPayload(chatId, upstreamModel, prompt, options);
 
-    const headers = buildHeaders(account.token);
-    headers.Accept = "text/event-stream";  // streaming 请求必须的 Accept
+      const headers = buildHeaders(token);
+      headers.Accept = "text/event-stream";
 
-    const resp = await fetch(
-      `${QWEN_BASE_URL}/api/v2/chat/completions?chat_id=${chatId}`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
+      const resp = await fetch(
+        `${QWEN_BASE_URL}/api/v2/chat/completions?chat_id=${chatId}`,
+        { method: "POST", headers, body: JSON.stringify(payload) }
+      );
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "");
+        await deleteChatSession(token, chatId);
+        if (resp.status === 401 || resp.status === 403) {
+          const err = new Error("Qwen token 已失效");
+          err.status = resp.status;
+          err._tokenExpired = true;
+          throw err;
+        }
+        throw new Error(`Qwen 请求失败 HTTP ${resp.status}: ${errText.slice(0, 200)}`);
       }
-    );
 
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => "");
-      await deleteChatSession(account.token, chatId);
-      throw new Error(`Qwen 请求失败 HTTP ${resp.status}: ${errText.slice(0, 200)}`);
-    }
+      const contentType = resp.headers.get("content-type") || "";
+      if (!contentType.includes("text/event-stream")) {
+        const fullBody = await resp.text().catch(() => "<read failed>");
+        await deleteChatSession(token, chatId);
+        throw new Error(`Qwen 请求错误: ${fullBody.slice(0, 150)}`);
+      }
 
-    const contentType = resp.headers.get("content-type") || "";
+      return { resp, chatId };
+    };
 
-    // 若返回的不是 SSE 流，读取完整 body 并报错
-    if (!contentType.includes("text/event-stream")) {
-      const fullBody = await resp.text().catch(() => "<read failed>");
-      console.error("[Qwen] Non-SSE response:", fullBody.slice(0, 500));
-      await deleteChatSession(account.token, chatId);
-      throw new Error(`Qwen 请求错误: ${fullBody.slice(0, 150)}`);
-    }
+    const { resp, chatId } = await this._withAutoRefresh(account, doChat);
+
+    // 产出会话 ID，供 chatLoop 续聊复用
+    yield { kind: "__sessionId", text: chatId };
 
     const decoder = new TextDecoder();
     const reader = resp.body.getReader();
@@ -503,6 +988,13 @@ export class QwenProvider extends BaseProvider {
           const data = trimmed.slice(5).trimStart();
           if (!data || data === "[DONE]") continue;
 
+          // 提取 response_id 作为 messageId（供续聊 parentMessageId 使用）
+          try {
+            const obj = JSON.parse(data);
+            const rid = obj?.response?.created?.response_id || obj?.response_id;
+            if (rid) yield { kind: "__messageId", text: rid };
+          } catch {}
+
           const deltas = parseQwenSseData(data);
           if (deltas) {
             for (const delta of deltas) {
@@ -517,6 +1009,37 @@ export class QwenProvider extends BaseProvider {
     }
   }
 
+  // ── 图片生成（公开方法，供 server.js /v1/images/generations 调用）──
+
+  /**
+   * 图片/视频生成
+   * @param {object} options
+   * @param {string} options.prompt - 提示词
+   * @param {string} [options.model] - 模型 ID
+   * @param {string} [options.size] - 尺寸 "1:1"|"4:3"|"3:4"|"16:9"|"9:16"
+   * @param {string} [options.chatType] - "t2i"|"t2v"|"image_edit"
+   * @param {Array} [options.files] - 图片编辑的文件列表 [{url: "..."}]
+   * @param {string} [options.accountId] - 账号 ID
+   * @returns {Promise<{url: string, chatType: string}>}
+   */
+  async generateImage(options = {}) {
+    const account = this.getAccountInfo(options.accountId);
+    if (!account) throw new Error("未登录 Qwen，请先运行 chat2cli login");
+
+    const realModels = await this._fetchModels(account.token);
+    const model = options.model || realModels[0]?.id;
+    const chatType = options.chatType || resolveChatType(model);
+    const prompt = options.prompt || "";
+
+    if (!prompt && chatType !== "image_edit") {
+      throw new Error("缺少 prompt 参数");
+    }
+
+    return await this._withAutoRefresh(account, () =>
+      generateImageVideo(account, model, prompt, { ...options, chatType })
+    );
+  }
+
   // ── Server / Agent 桥接 ──
 
   async startCompletion(messages, options = {}) {
@@ -527,51 +1050,69 @@ export class QwenProvider extends BaseProvider {
 
     const realModels = await this._fetchModels(account.token);
     const model = options.model || realModels[0]?.id;
+    const chatType = resolveChatType(model);
+    const upstreamModel = resolveUpstreamModelId(model, realModels);
     const prompt = options.prompt || buildPromptFromMessages(messages);
 
-    // 续聊时复用已有 chatId，否则创建新的
-    const chatId = options.sessionId || await createChatSession(account.token, model);
-    const payload = buildQwenPayload(chatId, model, prompt, options);
-    // 续聊时设置 parent_id
-    if (options.parentMessageId) {
-      payload.messages[0].parent_id = options.parentMessageId;
+    // 图片/视频生成走专用路径
+    if (chatType === "t2i" || chatType === "t2v" || chatType === "image_edit") {
+      const result = await this._withAutoRefresh(account, () =>
+        generateImageVideo(account, model, prompt, {
+          chatType,
+          size: options.size,
+          files: options.files,
+        })
+      );
+      // 返回一个包装对象，让 server.js 的 image 端点处理
+      result._isImageResult = true;
+      result._model = upstreamModel;
+      return result;
     }
 
-    const headers = buildHeaders(account.token);
-    headers.Accept = "text/event-stream";  // streaming 请求必须的 Accept
-
-    const resp = await fetch(
-      `${QWEN_BASE_URL}/api/v2/chat/completions?chat_id=${chatId}`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
+    const doStartCompletion = async (token) => {
+      const chatId = options.sessionId || await createChatSession(token, upstreamModel, chatType);
+      const payload = buildQwenPayload(chatId, upstreamModel, prompt, options);
+      if (options.parentMessageId) {
+        payload.messages[0].parent_id = options.parentMessageId;
       }
-    );
 
-    // 验证响应状态
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => "");
-      await deleteChatSession(account.token, chatId).catch(() => {});
-      const err = new Error(`Qwen 请求失败 HTTP ${resp.status}: ${errText.slice(0, 200)}`);
-      err.status = resp.status;
-      err._sessionId = chatId;
-      throw err;
-    }
+      const headers = buildHeaders(token);
+      headers.Accept = "text/event-stream";
 
-    // 验证返回的是 SSE 流
-    const contentType = resp.headers.get("content-type") || "";
-    if (!contentType.includes("text/event-stream")) {
-      const fullBody = await resp.text().catch(() => "<read failed>");
-      await deleteChatSession(account.token, chatId).catch(() => {});
-      const err = new Error(`Qwen 请求错误 (非 SSE 响应): ${fullBody.slice(0, 150)}`);
-      err.status = resp.status;
-      err._sessionId = chatId;
-      throw err;
-    }
+      const resp = await fetch(
+        `${QWEN_BASE_URL}/api/v2/chat/completions?chat_id=${chatId}`,
+        { method: "POST", headers, body: JSON.stringify(payload) }
+      );
 
-    // Agent 循环用：附加 sessionId 供后续续聊
-    resp._sessionId = chatId;
-    return resp;
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "");
+        await deleteChatSession(token, chatId).catch(() => {});
+        if (resp.status === 401 || resp.status === 403) {
+          const err = new Error("Qwen token 已失效");
+          err.status = resp.status;
+          err._tokenExpired = true;
+          throw err;
+        }
+        const err = new Error(`Qwen 请求失败 HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+        err.status = resp.status;
+        err._sessionId = chatId;
+        throw err;
+      }
+
+      const contentType = resp.headers.get("content-type") || "";
+      if (!contentType.includes("text/event-stream")) {
+        const fullBody = await resp.text().catch(() => "<read failed>");
+        await deleteChatSession(token, chatId).catch(() => {});
+        const err = new Error(`Qwen 请求错误 (非 SSE 响应): ${fullBody.slice(0, 150)}`);
+        err.status = resp.status;
+        err._sessionId = chatId;
+        throw err;
+      }
+
+      resp._sessionId = chatId;
+      return resp;
+    };
+
+    return await this._withAutoRefresh(account, doStartCompletion);
   }
 }

@@ -7,7 +7,7 @@ import { printSuccess, printError, printInfo, printTable, printWarn, truncate, f
 import { chatLoop, echoMessages } from "../commands/chat.js";
 import { printChatHeader } from "../utils/format.js";
 
-async function selectDsAccount(provider) {
+async function selectAccount(provider) {
   const accounts = provider.listAccounts();
   if (!accounts.length) return null;
   if (accounts.length === 1) return accounts[0];
@@ -18,6 +18,9 @@ async function selectDsAccount(provider) {
   }]);
   return accounts[accountIndex];
 }
+
+// 保留旧名兼容
+const selectDsAccount = selectAccount;
 
 export async function runHistory(subCommand, opts = {}, ...args) {
   initProviders();
@@ -36,6 +39,9 @@ export async function runHistory(subCommand, opts = {}, ...args) {
     case "batch-ds": await batchDeleteDs(limit); break;
     case "ds-clear": await clearDsSessions(); break;
     case "ds-search": await searchDsSessions(args.join(" "), limit); break;
+    case "qw": await listQwSessions(limit); break;
+    case "qw-continue": await continueQwSession(args[0], limit); break;
+    case "qw-delete": await deleteQwSession(args[0], limit); break;
     default: await listAll(); break;
   }
 }
@@ -58,7 +64,12 @@ async function listAll() {
   if (provider?.isAuthenticated()) {
     process.stdout.write(chalk.gray("\n使用 chat2cli history ds 查看 DeepSeek 云端会话\n"));
   }
-  if (!convs.length && !provider?.isAuthenticated()) {
+  // 提示 Qwen 会话
+  const qwProvider = getProvider("qwen");
+  if (qwProvider?.isAuthenticated()) {
+    process.stdout.write(chalk.gray("使用 chat2cli history qw 查看 Qwen 云端会话\n"));
+  }
+  if (!convs.length && !provider?.isAuthenticated() && !qwProvider?.isAuthenticated()) {
     printInfo("暂无记录。运行 chat2cli chat 开始对话。");
   }
 }
@@ -665,5 +676,160 @@ async function continueDsSessionById(provider, account, sessionId, limit = 0) {
       }));
       process.stdout.write(chalk.green("✓ ") + `对话已保存\n`);
     });
+  }
+}
+
+// ─── Qwen 云端会话 ───
+
+async function listQwSessions(limit = 0) {
+  const provider = getProvider("qwen");
+  if (!provider?.isAuthenticated()) { printError("未登录 Qwen"); return; }
+
+  const account = await selectAccount(provider);
+  if (!account) { printError("没有 Qwen 账号"); return; }
+
+  const spinner = ora("正在获取 Qwen 会话列表...").start();
+  try {
+    const sessions = await provider.listSessions(account.id);
+    spinner.stop();
+
+    if (!sessions.length) { printInfo("该账号暂无云端会话。"); return; }
+
+    const display = limit > 0 ? sessions.slice(0, limit) : sessions;
+    printInfo(`${accountLabel(account)} 的云端会话 ${chalk.bold(display.length)} 条 (共 ${sessions.length} 条)\n`);
+    printTable(
+      ["ID", "类型", "标题", "模型", "更新时间"],
+      display.map((s) => [
+        (s.id || "").slice(0, 12),
+        s.chatType || "t2t",
+        truncate(s.title || "未命名", 25),
+        truncate(s.model || "", 15),
+        formatDate(s.updatedAt || s.createdAt)
+      ])
+    );
+
+    process.stdout.write(chalk.gray("\nchat2cli history qw-continue <id>  继续云端会话\n"));
+    process.stdout.write(chalk.gray("chat2cli history qw-delete <id>    删除云端会话\n"));
+  } catch (err) {
+    spinner.fail(err.message);
+  }
+}
+
+async function continueQwSession(sessionId, limit = 0) {
+  if (!sessionId) { printError("请指定会话 ID"); return; }
+
+  const provider = getProvider("qwen");
+  if (!provider?.isAuthenticated()) { printError("未登录 Qwen"); return; }
+
+  const account = await selectAccount(provider);
+  if (!account) { printError("没有 Qwen 账号"); return; }
+
+  const listSpinner = ora("正在查找会话...").start();
+  let sessions, fullChatId;
+  try {
+    sessions = await provider.listSessions(account.id);
+    const match = sessions.find((s) => (s.id || "").startsWith(sessionId));
+    if (!match) {
+      listSpinner.fail(`未找到匹配的会话: ${sessionId}`);
+      return;
+    }
+    fullChatId = match.id;
+    listSpinner.succeed(`找到会话: ${chalk.bold(match.title || fullChatId.slice(0, 12))}`);
+  } catch (err) {
+    listSpinner.fail(err.message);
+    return;
+  }
+
+  const detailSpinner = ora("正在获取会话消息...").start();
+  let detail;
+  try {
+    detail = await provider.getSessionDetail(fullChatId, account.id);
+    detailSpinner.succeed("已加载");
+  } catch (err) {
+    detailSpinner.fail(err.message);
+    return;
+  }
+
+  const historyMessages = detail?.data?.chat?.history?.messages || {};
+  const messages = detail?.data?.chat?.messages || [];
+  const allRawMessages = [...Object.values(historyMessages), ...messages];
+  if (!allRawMessages.length) { printWarn("该会话无消息记录"); return; }
+
+  function extractText(content) {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) return content.filter(c => c.type === "text").map(c => c.text || "").join(" ");
+    return "";
+  }
+
+  const converted = [];
+  for (const m of allRawMessages) {
+    if (m.role === "user") converted.push({ role: "user", content: extractText(m.content) });
+    else if (m.role === "assistant") converted.push({ role: "assistant", content: extractText(m.content) });
+  }
+
+  const currentModel = detail?.data?.chat?.models?.[0] || "qwen3.7-max";
+
+  printChatHeader(provider.label, currentModel, fullChatId.slice(0, 8));
+  echoMessages(converted, false);
+
+  await chatLoop(provider, converted, currentModel, account.id, null, null, false);
+
+  if (converted.length > allRawMessages.length) {
+    import("../utils/id.js").then(({ createId }) => {
+      const convId = createId();
+      updateStore((state) => ({
+        ...state,
+        conversations: [{
+          id: convId, provider: provider.name, model: currentModel,
+          title: converted.find((m) => m.role === "user")?.content?.slice(0, 50) || "未命名",
+          messages: [...converted],
+          accountId: account.id || "", dsSessionId: fullChatId,
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+        }, ...state.conversations]
+      }));
+      process.stdout.write(chalk.green("✓ ") + `对话已保存\n`);
+    });
+  }
+}
+
+async function deleteQwSession(sessionId, limit = 0) {
+  if (!sessionId) { printError("请指定会话 ID"); return; }
+
+  const provider = getProvider("qwen");
+  if (!provider?.isAuthenticated()) { printError("未登录 Qwen"); return; }
+
+  const account = await selectAccount(provider);
+  if (!account) return;
+
+  const listSpinner = ora("正在查找会话...").start();
+  let fullChatId, title;
+  try {
+    const sessions = await provider.listSessions(account.id);
+    const match = sessions.find((s) => (s.id || "").startsWith(sessionId));
+    if (!match) {
+      listSpinner.fail(`未找到匹配的会话: ${sessionId}`);
+      return;
+    }
+    fullChatId = match.id;
+    title = match.title;
+    listSpinner.succeed(`找到会话: ${chalk.bold(title || fullChatId.slice(0, 12))}`);
+  } catch (err) {
+    listSpinner.fail(err.message);
+    return;
+  }
+
+  const { confirm } = await inquirer.prompt([{
+    type: "confirm", name: "confirm",
+    message: `确定从云端删除会话 ${chalk.bold(title || fullChatId.slice(0, 12))} 吗？`,
+    default: false
+  }]);
+  if (!confirm) { printInfo("已取消。"); return; }
+
+  const spinner = ora("正在删除...").start();
+  try {
+    await provider.deleteChatSession(fullChatId, account.id);
+    spinner.succeed("已删除");
+  } catch (err) {
+    spinner.fail(err.message);
   }
 }
