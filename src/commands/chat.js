@@ -1061,6 +1061,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
           messages.length = 0;
           messages.push(...conv.messages);
           sessionId = conv.dsSessionId || null;
+          parentMessageId = conv.parentMessageId || null;
           accountId = conv.accountId || accountId;
           currentModel = conv.model || currentModel;
           process.stdout.write("   " + chalk.green("✓ ") + `已切换到: ${chalk.bold(conv.title || "未命名")}\n\n`);
@@ -1107,15 +1108,16 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       if (result.thinking) assistantMsg.thinking = result.thinking;
       messages.push(assistantMsg);
 
-      // 新会话首次创建后复用 sessionId（后续消息不再新开会话）
-      if (!sessionId && result.sessionId) {
+      // 每次请求后更新 sessionId（可能因旧 session 失效而被上游重建）
+      if (result.sessionId && result.sessionId !== sessionId) {
         sessionId = result.sessionId;
         if (sessionRef) sessionRef.sessionId = sessionId;
       }
 
-      // 更新 parentMessageId 供下次继聊使用（参照 deepseek2api onReady 更新）
-      if (result.messageId && sessionId) {
+      // 更新 parentMessageId 供下次继聊使用
+      if (result.messageId) {
         parentMessageId = result.messageId;
+        if (sessionRef) sessionRef.messageId = result.messageId;
       }
 
       redrawFooter();
@@ -1185,13 +1187,13 @@ async function runInteractiveChat(provider, opts = {}) {
     const convId = createId();
     printChatHeader(chatProvider.label, currentModel, convId.slice(0, 8));
     const messages = [];
-    const sessionRef = { sessionId: null };
+    const sessionRef = { sessionId: null, messageId: null };
     await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown, {}, sessionRef);
     if (messages.length > 0) {
       const conv = {
         id: convId, provider: chatProvider.name, model: currentModel,
         title: buildConversationTitle(messages), messages: [...messages],
-        accountId: accountId || "", dsSessionId: sessionRef.sessionId || undefined,
+        accountId: accountId || "", dsSessionId: sessionRef.sessionId || undefined, parentMessageId: sessionRef.messageId || undefined,
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
       };
       saveConversation(conv);
@@ -1211,14 +1213,14 @@ async function runInteractiveChat(provider, opts = {}) {
 
     printChatHeader(chatProvider.label, currentModel, convId.slice(0, 8));
     const messages = [];
-    const sessionRef = { sessionId: null };
+    const sessionRef = { sessionId: null, messageId: null };
     await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown, {}, sessionRef);
 
     if (messages.length > 0) {
       const conv = {
         id: convId, provider: chatProvider.name, model: currentModel,
         title: buildConversationTitle(messages), messages: [...messages],
-        accountId: accountId || "", dsSessionId: sessionRef.sessionId || undefined,
+        accountId: accountId || "", dsSessionId: sessionRef.sessionId || undefined, parentMessageId: sessionRef.messageId || undefined,
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
       };
       saveConversation(conv);
@@ -1237,15 +1239,15 @@ async function runInteractiveChat(provider, opts = {}) {
     printChatHeader(chatProvider.label, currentModel, conv.id.slice(0, 8));
     echoMessages(messages, useMarkdown);
 
-    const sessionRef = { sessionId: conv.dsSessionId || null };
-    await chatLoop(chatProvider, messages, currentModel, convAccountId, conv.dsSessionId || null, null, useMarkdown, {}, sessionRef);
+    const sessionRef = { sessionId: conv.dsSessionId || null, messageId: conv.parentMessageId || null };
+    await chatLoop(chatProvider, messages, currentModel, convAccountId, conv.dsSessionId || null, conv.parentMessageId || null, useMarkdown, {}, sessionRef);
 
     if (messages.length > conv.messages.length) {
       updateStore((state) => ({
         ...state,
         conversations: state.conversations.map((c) =>
           c.id === conv.id
-            ? { ...c, model: currentModel, messages, dsSessionId: sessionRef.sessionId || c.dsSessionId, updatedAt: new Date().toISOString() }
+            ? { ...c, model: currentModel, messages, dsSessionId: sessionRef.sessionId || c.dsSessionId, parentMessageId: sessionRef.messageId || c.parentMessageId, updatedAt: new Date().toISOString() }
             : c
         ),
       }));

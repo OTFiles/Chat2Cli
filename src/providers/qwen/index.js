@@ -175,7 +175,7 @@ function buildQwenPayload(chatId, model, prompt, options = {}) {
     research_mode: "normal",
     auto_thinking: finalThinking,
     thinking_mode: finalThinking ? "Auto" : "Disabled",
-    thinking_format: "summary",
+    thinking_format: "detail",
     auto_search: searchEnabled,
     code_interpreter: false,
     plugins_enabled: false,
@@ -419,75 +419,35 @@ async function generateImageVideo(account, model, prompt, options = {}) {
 //  SSE 解析
 // ═══════════════════════════════════════════════════
 
-function extractSummaryThinking(extra) {
-  if (!extra) return "";
-  const parts = [];
-  for (const key of ["summary_title", "summary_thought"]) {
-    const val = extra[key];
-    if (!val) continue;
-    const items = val?.content;
-    if (Array.isArray(items)) {
-      for (const item of items) {
-        if (typeof item === "string" && item.trim()) parts.push(item.trim());
-      }
-    } else if (typeof items === "string" && items.trim()) {
-      parts.push(items.trim());
-    }
-  }
-  return parts.join("\n");
-}
-
 function parseQwenSseData(jsonStr) {
   try {
     const obj = JSON.parse(jsonStr);
     const events = [];
 
+    // 跳过元数据事件
     if (obj["response.created"]) return null;
 
+    // 严格对齐 Qwen2API：只处理 choices[0].delta，且必须有 phase
     const choice = obj?.choices?.[0];
-    if (choice?.delta) {
-      const delta = choice.delta;
-      const extra = delta.extra;
+    if (!choice?.delta) return null;
 
-      const reasoning = firstString(delta.reasoning_content, delta.reasoning,
-        delta.reasoning_text, delta.thinking, delta.thoughts,
-        extra?.reasoning_content, extra?.reasoning,
-        extra?.reasoning_text, extra?.thinking, extra?.thoughts);
+    const delta = choice.delta;
+    const phase = delta.phase || "";
+    const content = delta.content;
 
-      const summaryThinking = extractSummaryThinking(extra);
-      const allThinking = [reasoning, summaryThinking].filter(Boolean).join("\n");
+    // 无 phase 或 phase 非 think/answer → 丢弃（对齐 Qwen2API）
+    if (!content || (phase !== "think" && phase !== "answer")) return null;
 
-      const content = delta.content || "";
-
-      if (allThinking) events.push({ kind: "thinking", text: allThinking });
-      if (content) events.push({ kind: "response", text: content });
-    }
-
-    const topReasoning = firstString(obj.reasoning_content, obj.reasoning, obj.thinking);
-    const topContent = firstString(obj.content, obj.answer, obj.text, obj.delta);
-    if (topReasoning) events.push({ kind: "thinking", text: topReasoning });
-    if (topContent) events.push({ kind: "response", text: topContent });
-
-    if (obj.data && typeof obj.data === "object" && !Array.isArray(obj.data)) {
-      const subEvents = parseQwenSseData(JSON.stringify(obj.data));
-      if (subEvents) events.push(...subEvents);
-    }
-    if (obj.message && typeof obj.message === "object" && !Array.isArray(obj.message)) {
-      const subEvents = parseQwenSseData(JSON.stringify(obj.message));
-      if (subEvents) events.push(...subEvents);
+    if (phase === "think") {
+      events.push({ kind: "thinking", text: content });
+    } else {
+      events.push({ kind: "response", text: content });
     }
 
     return events.length > 0 ? events : null;
   } catch {
     return null;
   }
-}
-
-function firstString(...values) {
-  for (const v of values) {
-    if (typeof v === "string" && v.trim() !== "") return v;
-  }
-  return "";
 }
 
 // ═══════════════════════════════════════════════════
@@ -932,10 +892,20 @@ export class QwenProvider extends BaseProvider {
 
     // CLI chat 默认 keepSession=true（保留会话用于续聊）
     const keepSession = options.keepSession !== false;
+    // 续聊时只发最后一条用户消息（不打包历史）
+    const isContinuation = !!(options.sessionId && options.parentMessageId);
+    const finalPrompt = isContinuation
+      ? (messages.filter(m => m.role === "user").pop()?.content || prompt)
+      : prompt;
 
     const doChat = async (token) => {
       const chatId = options.sessionId || await createChatSession(token, upstreamModel, chatType);
-      const payload = buildQwenPayload(chatId, upstreamModel, prompt, options);
+      const payload = buildQwenPayload(chatId, upstreamModel, finalPrompt, options);
+      if (options.parentMessageId) {
+        payload.messages[0].parentId = options.parentMessageId;
+        payload.messages[0].parent_id = options.parentMessageId;
+        payload.parent_id = options.parentMessageId;
+      }
 
       const headers = buildHeaders(token);
       headers.Accept = "text/event-stream";
@@ -1057,7 +1027,12 @@ export class QwenProvider extends BaseProvider {
     const model = options.model || realModels[0]?.id;
     const chatType = resolveChatType(model);
     const upstreamModel = resolveUpstreamModelId(model, realModels);
-    const prompt = options.prompt || buildPromptFromMessages(messages);
+    const fullPrompt = options.prompt || buildPromptFromMessages(messages);
+    // 续聊时只发最后一条用户消息（不打包历史）
+    const isContinuation = !!(options.sessionId && options.parentMessageId);
+    const prompt = isContinuation
+      ? (messages.filter(m => m.role === "user").pop()?.content || fullPrompt)
+      : fullPrompt;
 
     // 图片/视频生成走专用路径
     if (chatType === "t2i" || chatType === "t2v" || chatType === "image_edit") {
@@ -1078,7 +1053,9 @@ export class QwenProvider extends BaseProvider {
       const chatId = options.sessionId || await createChatSession(token, upstreamModel, chatType);
       const payload = buildQwenPayload(chatId, upstreamModel, prompt, options);
       if (options.parentMessageId) {
+        payload.messages[0].parentId = options.parentMessageId;
         payload.messages[0].parent_id = options.parentMessageId;
+        payload.parent_id = options.parentMessageId;
       }
 
       const headers = buildHeaders(token);

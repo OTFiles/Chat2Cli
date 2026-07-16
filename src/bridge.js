@@ -108,83 +108,32 @@ export async function* consumeRawStream(bodyStream) {
 // ═══════════════════════════════════════════════════
 
 /**
- * 返回第一个非空字符串值（用于从多个候选字段中提取内容）。
- */
-function firstNonEmpty(...values) {
-  for (const v of values) {
-    if (typeof v === "string" && v.trim() !== "") return v;
-  }
-  return "";
-}
-
-/** 提取 extra.summary_title / extra.summary_thought 的 content 数组文本 */
-function extractExtraSummaryText(extra) {
-  if (!extra) return "";
-  const parts = [];
-  for (const key of ["summary_title", "summary_thought"]) {
-    const val = extra[key];
-    if (!val) continue;
-    const items = val?.content;
-    if (Array.isArray(items)) {
-      for (const item of items) {
-        if (typeof item === "string" && item.trim()) parts.push(item.trim());
-      }
-    } else if (typeof items === "string" && items.trim()) {
-      parts.push(items.trim());
-    }
-  }
-  return parts.join("\n");
-}
-
-/**
  * 将 Qwen SSE 数据行解析为 { kind, text } delta 数组。
- * 参照 qwen2API upstream/sse_consumer.go ParseQwenEvent()
- * 与 Qwen provider 自身的 parseQwenSseData 保持一致：
- * 同一帧中同时存在 reasoning 和 content 时，两者都返回。
- *
- * 返回 Array<{kind: string, text: string}>，可能包含 0~2 个元素。
+ * 严格对齐 Qwen2API：只处理 choices[0].delta.phase === 'think'|'answer'
  */
 export function createQwenDeltaDecoder() {
   return {
     consume(jsonStr) {
       try {
         const obj = JSON.parse(jsonStr);
-        const results = [];
 
-        // 跳过 response.created 等元数据事件
-        if (obj["response.created"]) return results;
+        // 跳过元数据事件
+        if (obj["response.created"]) return [];
 
-        const choice = obj?.choices?.[0];
-        if (choice?.delta) {
-          const delta = choice.delta;
-          const extra = delta.extra;
+        // 严格对齐 Qwen2API：只处理 choices[0].delta，且必须有 phase
+        const delta = obj?.choices?.[0]?.delta;
+        if (!delta) return [];
 
-          // 检查所有可能的 reasoning 字段变体
-          const reasoning = firstNonEmpty(
-            delta.reasoning_content, delta.reasoning,
-            delta.reasoning_text, delta.thinking, delta.thoughts,
-            extra?.reasoning_content, extra?.reasoning,
-            extra?.reasoning_text, extra?.thinking, extra?.thoughts
-          );
-          // thinking_summary 阶段：extra.summary_title / extra.summary_thought
-          const summaryThinking = extractExtraSummaryText(extra);
-          const combinedThinking = [reasoning, summaryThinking].filter(Boolean).join("\n");
+        const phase = delta.phase || "";
+        const content = delta.content;
 
-          if (combinedThinking) results.push({ kind: "thinking", text: combinedThinking });
+        // 无 phase 或 phase 非 think/answer → 丢弃
+        if (!content || (phase !== "think" && phase !== "answer")) return [];
 
-          const content = firstNonEmpty(delta.content);
-          if (content) results.push({ kind: "response", text: content });
-
-          if (results.length > 0) return results;
+        if (phase === "think") {
+          return [{ kind: "thinking", text: content }];
         }
-
-        // 顶层 fallback
-        const topReasoning = firstNonEmpty(obj.reasoning_content, obj.reasoning, obj.thinking);
-        if (topReasoning) results.push({ kind: "thinking", text: topReasoning });
-        const topContent = firstNonEmpty(obj.content, obj.answer, obj.text, obj.delta);
-        if (topContent) results.push({ kind: "response", text: topContent });
-
-        return results;
+        return [{ kind: "response", text: content }];
       } catch {
         return [];
       }
@@ -194,8 +143,7 @@ export function createQwenDeltaDecoder() {
 
 /**
  * 消费 Qwen 的 SSE 流，yield { kind, text } deltas。
- * 注意：createQwenDeltaDecoder 现在返回数组，
- * 同一帧可能同时包含 thinking 和 response。
+ * 严格对齐 Qwen2API：只处理 choices[0].delta.phase === 'think'|'answer'
  */
 export async function consumeQwenStream(bodyStream, onDelta) {
   if (!bodyStream) return;

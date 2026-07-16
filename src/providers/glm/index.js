@@ -558,7 +558,12 @@ export class GlmProvider extends BaseProvider {
     const chatMode = resolveChatMode(model, options);
     const isNetworking = resolveNetworking(model, options);
     const upstreamModel = resolveUpstreamModel(model);
-    const prompt = options.prompt || buildPromptFromMessages(messages);
+    const fullPrompt = options.prompt || buildPromptFromMessages(messages);
+    // 续聊时只发最后一条用户消息（GLM API 通过 conversation_id 管理上下文）
+    const isContinuation = !!(options.sessionId);
+    const prompt = isContinuation
+      ? (messages.filter(m => m.role === "user").pop()?.content || fullPrompt)
+      : fullPrompt;
 
     const assistantId = DEFAULT_ASSISTANT_ID;
 
@@ -734,7 +739,12 @@ export class GlmProvider extends BaseProvider {
     const chatMode = resolveChatMode(model, options);
     const isNetworking = resolveNetworking(model, options);
     const upstreamModel = resolveUpstreamModel(model);
-    const prompt = options.prompt || buildPromptFromMessages(messages);
+    const fullPrompt2 = options.prompt || buildPromptFromMessages(messages);
+    // 续聊时只发最后一条用户消息
+    const isContinuation2 = !!(options.sessionId);
+    const prompt = isContinuation2
+      ? (messages.filter(m => m.role === "user").pop()?.content || fullPrompt2)
+      : fullPrompt2;
     const assistantId = DEFAULT_ASSISTANT_ID;
 
     const requestBody = JSON.stringify({
