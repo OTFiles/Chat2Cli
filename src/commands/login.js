@@ -248,7 +248,7 @@ async function loginGlm(provider) {
   process.stdout.write(chalk.gray("如何获取 GLM Refresh Token:\n"));
   process.stdout.write(chalk.gray("  1. 浏览器打开 https://chatglm.cn 并登录\n"));
   process.stdout.write(chalk.gray("  2. 打开开发者工具 (F12) → Application → Local Storage\n"));
-  process.stdout.write(chalk.gray("  3. 找到 key 为 'chatglm_refresh_token' 的项\n\n"));
+  process.stdout.write(chalk.gray("  3. 找到 key 为 'chatglm_refresh_token' 的项\n     注: 如果在Local Storage找不到chatglm_refresh_token，可以试着去cookie里查找\n\n"));
 
   const { loginType } = await inquirer.prompt([{
     type: "list",
