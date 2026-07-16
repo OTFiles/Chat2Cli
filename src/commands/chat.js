@@ -53,13 +53,50 @@ function formatTime(isoStr) {
   return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-async function loadDsSessionMessages(provider, account, sessionId) {
+async function loadRemoteSessionMessages(provider, account, sessionId, providerName) {
   try {
+    if (providerName === "qwen") {
+      const detail = await provider.getSessionDetail(sessionId, account.id);
+      // Qwen session detail: { data: { messages: [...] } } or { messages: [...] }
+      const raw = detail?.data || detail;
+      const msgs = Array.isArray(raw?.messages) ? raw.messages : [];
+      // Normalize: extract role + content
+      const messages = msgs.map(m => ({
+        role: m.role || "user",
+        content: typeof m.content === "string" ? m.content : (m.content?.text || ""),
+      })).filter(m => m.content);
+      // Find last assistant message response_id for parentMessageId
+      const lastAssistant = [...msgs].reverse().find(m => m.role === "assistant");
+      const currentMessageId = lastAssistant?.response_id || lastAssistant?.id || null;
+      return { messages, currentMessageId };
+    }
+    // DeepSeek
     const result = await provider.fetchMessages(account.id, sessionId);
     return result || { messages: [], currentMessageId: null };
   } catch (err) {
     process.stdout.write(chalk.yellow(`  加载云端消息失败: ${err.message}\n`));
     return { messages: [], currentMessageId: null };
+  }
+}
+
+/**
+ * 加载 Qwen 远程会话列表
+ */
+async function loadQwenRemoteSessions(provider, account, allEntries) {
+  try {
+    const sessions = await provider.listSessions(account.id);
+    for (const s of sessions) {
+      if (allEntries.some((e) => e.type === "remote" && e.session.id === s.id)) continue;
+      allEntries.push({
+        type: "remote",
+        providerName: "qwen",
+        session: { id: s.id, title: s.title, updatedAt: s.updatedAt },
+        account,
+        sortTime: s.updatedAt || s.createdAt || "",
+      });
+    }
+  } catch (err) {
+    process.stdout.write(chalk.yellow(`  加载 Qwen 云端列表失败: ${err.message}\n`));
   }
 }
 
@@ -70,13 +107,13 @@ function buildEntryLine(entry, index, selected) {
   const bg = selected ? chalk.bgCyan.black : chalk.reset;
   const maxCols = (process.stdout.columns || 80) - 1; // 预留 1 列防止换行
 
-  const isDs = entry.type === "ds";
-  const full = isDs
+  const isRemote = entry.type === "remote";
+  const full = isRemote
     ? (entry.session.title || "未命名")
     : (entry.conv.title || "未命名");
-  const time = formatTime(isDs ? entry.sortTime : (entry.conv.updatedAt || entry.conv.createdAt));
-  const tag = isDs ? chalk.magenta("[云端]") : chalk.cyan("[本地]");
-  const pinned = isDs && entry.session.pinned ? chalk.yellow("★") : " ";
+  const time = formatTime(isRemote ? entry.sortTime : (entry.conv.updatedAt || entry.conv.createdAt));
+  const tag = isRemote ? chalk.magenta("[云端]") : chalk.cyan("[本地]");
+  const pinned = isRemote && entry.session.pinned ? chalk.yellow("★") : " ";
 
   // visible layout: " " + cursor + num + " " + tag + " " + pinned + title + pad + " " + time
   //                    1      2       2     1      4      1       1     titleW   pad    1     16
@@ -266,7 +303,7 @@ async function pickConversation(provider, accountId) {
   const state = getStore();
   const providerName = provider.name;
 
-  // 收集本地对话（全部加载，数量有限）
+  // 收集本地对话
   const allEntries = [];
   for (const conv of state.conversations) {
     if (conv.provider === providerName && conv.messages?.length > 0) {
@@ -279,63 +316,75 @@ async function pickConversation(provider, accountId) {
   }
   allEntries.sort((a, b) => (b.sortTime || "").localeCompare(a.sortTime || ""));
 
-  // 云端会话按需分页加载（游标分页）
-  let dsAccount = null;
+  // ── 远程会话加载 ──
+  const account = accountId ? provider.getAccountInfo(accountId) : provider.getDefaultAccount();
+  let remoteLoaded = false;
+  let remoteNoMore = true;
+
+  // DeepSeek: 游标分页
   let dsCursor = null;
-  let dsNoMore = true;
-
-  if (providerName === "deepseek" && provider.isAuthenticated()) {
-    dsAccount = accountId ? provider.getAccountInfo(accountId) : provider.getDefaultAccount();
-    if (dsAccount) {
-      dsNoMore = false;
-      try {
-        const result = await provider.fetchSessionPage(dsAccount.id);
-        const sessions = result.sessions || [];
-        dsNoMore = !result.hasMore;
-        dsCursor = result.lastUpdatedAt;
-        for (const s of sessions) {
-          allEntries.push({
-            type: "ds",
-            session: s,
-            account: dsAccount,
-            sortTime: typeof s.updatedAt === "number"
-              ? new Date(s.updatedAt * 1000).toISOString()
-              : (s.updatedAt || ""),
-          });
-        }
-      } catch {
-        dsNoMore = true;
-      }
-    }
-  }
-
-  if (allEntries.length === 0) return { action: "new" };
-
-  const loadMore = async () => {
-    if (dsNoMore || !dsAccount) return;
+  if (providerName === "deepseek" && account && typeof provider.fetchSessionPage === "function") {
+    remoteNoMore = false;
     try {
-      const result = await provider.fetchSessionPage(dsAccount.id, dsCursor);
+      const result = await provider.fetchSessionPage(account.id);
       const sessions = result.sessions || [];
-      dsNoMore = !result.hasMore;
+      remoteNoMore = !result.hasMore;
       dsCursor = result.lastUpdatedAt;
       for (const s of sessions) {
-        if (allEntries.some((e) => e.type === "ds" && e.session.id === s.id)) continue;
         allEntries.push({
-          type: "ds",
-          session: s,
-          account: dsAccount,
+          type: "remote",
+          providerName: "deepseek",
+          session: { id: s.id, title: s.title, updatedAt: s.updatedAt },
+          account,
           sortTime: typeof s.updatedAt === "number"
             ? new Date(s.updatedAt * 1000).toISOString()
             : (s.updatedAt || ""),
         });
       }
     } catch {
-      dsNoMore = true;
+      remoteNoMore = true;
+    }
+    remoteLoaded = true;
+  }
+
+  // Qwen: 一次性加载全部
+  if (providerName === "qwen" && account && typeof provider.listSessions === "function") {
+    await loadQwenRemoteSessions(provider, account, allEntries);
+    remoteLoaded = true;
+    remoteNoMore = true;
+  }
+
+  if (allEntries.length === 0) return { action: "new" };
+
+  const loadMore = async () => {
+    if (remoteNoMore || !account) return;
+    // DeepSeek 游标翻页
+    if (providerName === "deepseek" && typeof provider.fetchSessionPage === "function") {
+      try {
+        const result = await provider.fetchSessionPage(account.id, dsCursor);
+        const sessions = result.sessions || [];
+        remoteNoMore = !result.hasMore;
+        dsCursor = result.lastUpdatedAt;
+        for (const s of sessions) {
+          if (allEntries.some((e) => e.type === "remote" && e.session.id === s.id)) continue;
+          allEntries.push({
+            type: "remote",
+            providerName: "deepseek",
+            session: { id: s.id, title: s.title, updatedAt: s.updatedAt },
+            account,
+            sortTime: typeof s.updatedAt === "number"
+              ? new Date(s.updatedAt * 1000).toISOString()
+              : (s.updatedAt || ""),
+          });
+        }
+      } catch {
+        remoteNoMore = true;
+      }
     }
   };
 
   while (true) {
-    const cursor = await interactiveListPicker(allEntries, loadMore, () => dsNoMore);
+    const cursor = await interactiveListPicker(allEntries, loadMore, () => remoteNoMore);
     if (cursor === "exit") { process.stdout.write(chalk.gray("已取消。\n")); return { action: "exit" }; }
     if (cursor === null || cursor === -1) return { action: "new" };
 
@@ -346,19 +395,19 @@ async function pickConversation(provider, accountId) {
       return { action: "local", conv: entry.conv };
     }
 
-    if (entry.type === "ds") {
+    if (entry.type === "remote") {
       process.stdout.write(chalk.gray("\n正在加载云端消息...\n"));
-      const result = await loadDsSessionMessages(provider, entry.account, entry.session.id);
-      const dsMessages = result.messages || result;
-      if (!Array.isArray(dsMessages) || !dsMessages.length) {
+      const result = await loadRemoteSessionMessages(provider, entry.account, entry.session.id, entry.providerName);
+      const remoteMessages = result.messages || [];
+      if (!Array.isArray(remoteMessages) || !remoteMessages.length) {
         printInfo("该会话无消息记录，请选择其他会话。");
         continue;
       }
       return {
-        action: "ds",
+        action: "remote",
         account: entry.account,
         sessionId: entry.session.id,
-        messages: dsMessages,
+        messages: remoteMessages,
         currentMessageId: result.currentMessageId || null,
       };
     }
@@ -1256,19 +1305,18 @@ async function runInteractiveChat(provider, opts = {}) {
     return;
   }
 
-  if (picked.action === "ds") {
-    // 继续云端会话
+  if (picked.action === "remote") {
+    // 继续远程/云端会话
     const currentModel = modelOverride || resolveModel(chatProvider);
     const sessionId = picked.sessionId;
     const messages = [...picked.messages];
-    const dsAccountId = picked.account?.id || accountId;
-    // 使用 API 返回的 current_message_id 作为新消息的 parent
+    const remoteAccountId = picked.account?.id || accountId;
     const parentMsgId = picked.currentMessageId || null;
 
     printChatHeader(chatProvider.label, currentModel, sessionId.slice(0, 8));
     echoMessages(messages, useMarkdown);
 
-    await chatLoop(chatProvider, messages, currentModel, dsAccountId, sessionId, parentMsgId, useMarkdown);
+    await chatLoop(chatProvider, messages, currentModel, remoteAccountId, sessionId, parentMsgId, useMarkdown);
 
     if (messages.length > picked.messages.length) {
       // 保存到本地（暂存为本地对话副本）
@@ -1276,7 +1324,7 @@ async function runInteractiveChat(provider, opts = {}) {
       const conv = {
         id: convId, provider: chatProvider.name, model: currentModel,
         title: buildConversationTitle(messages), messages: [...messages],
-        accountId: dsAccountId || "", dsSessionId: sessionId,
+        accountId: remoteAccountId || "", dsSessionId: sessionId,
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
       };
       saveConversation(conv);
