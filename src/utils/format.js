@@ -121,7 +121,7 @@ export function printHelp() {
   process.stdout.write("  " + chalk.cyan("/clear") + "   清空当前上下文\n");
   process.stdout.write("  " + chalk.cyan("/model") + "   切换模型 (例: /model qwen-max)\n");
   process.stdout.write("  " + chalk.cyan("/models") + "  列出可用模型\n");
-  process.stdout.write("  " + chalk.cyan("/config") + "  查看/修改聊天参数 (thinking, search on|off)\n");
+  process.stdout.write("  " + chalk.cyan("/config") + "  查看/修改聊天参数 (thinking, search, keep on|off)\n");
   process.stdout.write("  " + chalk.cyan("/help") + "    显示此帮助\n");
   process.stdout.write("\n");
 }

@@ -930,8 +930,11 @@ export class QwenProvider extends BaseProvider {
 
     const prompt = buildPromptFromMessages(messages);
 
+    // CLI chat 默认 keepSession=true（保留会话用于续聊）
+    const keepSession = options.keepSession !== false;
+
     const doChat = async (token) => {
-      const chatId = await createChatSession(token, upstreamModel, chatType);
+      const chatId = options.sessionId || await createChatSession(token, upstreamModel, chatType);
       const payload = buildQwenPayload(chatId, upstreamModel, prompt, options);
 
       const headers = buildHeaders(token);
@@ -1005,7 +1008,9 @@ export class QwenProvider extends BaseProvider {
       }
     } finally {
       reader.releaseLock?.();
-      await deleteChatSession(account.token, chatId);
+      if (!keepSession) {
+        await deleteChatSession(account.token, chatId);
+      }
     }
   }
 
@@ -1110,6 +1115,9 @@ export class QwenProvider extends BaseProvider {
       }
 
       resp._sessionId = chatId;
+      resp._keepSession = options.keepSession === true;
+      resp._account = account;
+      resp._provider = this;
       return resp;
     };
 

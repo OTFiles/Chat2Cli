@@ -985,7 +985,8 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
         process.stdout.write("   " + chalk.bold("当前配置:\n"));
         process.stdout.write("     thinking:  " + (opts.thinkingEnabled ? chalk.green("on") : chalk.gray("off")) + "\n");
         process.stdout.write("     search:    " + (opts.enableSearch ? chalk.green("on") : chalk.gray("off")) + "\n");
-        process.stdout.write("\n   " + chalk.gray("用法: /config thinking on|off   /config search on|off\n\n"));
+        process.stdout.write("     keep:      " + (opts.keepSession ? chalk.green("on") : chalk.gray("off")) + "\n");
+        process.stdout.write("\n   " + chalk.gray("用法: /config thinking on|off   /config search on|off   /config keep on|off\n\n"));
         redrawFooter();
         continue;
       }
@@ -994,13 +995,13 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
         const key = parts[0];
         const val = parts[1]?.toLowerCase();
         printUserMsg(input);
-        if ((key === "thinking" || key === "search") && (val === "on" || val === "off" || val === "true" || val === "false")) {
-          const configKey = key === "thinking" ? "thinkingEnabled" : "enableSearch";
+        if ((key === "thinking" || key === "search" || key === "keep") && (val === "on" || val === "off" || val === "true" || val === "false")) {
+          const configKey = key === "thinking" ? "thinkingEnabled" : key === "search" ? "enableSearch" : "keepSession";
           const boolVal = val === "on" || val === "true";
           setChatOption(provider.name, configKey, boolVal);
           process.stdout.write("   " + chalk.green("✓ ") + `${key} = ${boolVal ? chalk.green("on") : chalk.gray("off")}` + chalk.gray("  (已保存)") + "\n\n");
         } else {
-          process.stdout.write("   " + chalk.red("✗ ") + `用法: /config thinking on|off   /config search on|off\n\n`);
+          process.stdout.write("   " + chalk.red("✗ ") + `用法: /config thinking on|off   /config search on|off   /config keep on|off\n\n`);
         }
         redrawFooter();
         continue;

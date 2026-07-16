@@ -564,7 +564,7 @@ export class GlmProvider extends BaseProvider {
 
     const requestBody = JSON.stringify({
       assistant_id: assistantId,
-      conversation_id: "",
+      conversation_id: options.sessionId || "",
       project_id: "",
       chat_type: "user_chat",
       messages: [
@@ -625,7 +625,10 @@ export class GlmProvider extends BaseProvider {
       throw new Error(`GLM 非预期响应: ${fullBody.slice(0, 150)}`);
     }
 
-    let conversationId = "";
+    // CLI chat 默认 keepSession=true（保留会话用于续聊）
+    const keepSession = options.keepSession !== false;
+
+    let conversationId = options.sessionId || "";
     let lastThinkingLen = 0;
     let lastTextLen = 0;
     let errorEncountered = false;
@@ -706,8 +709,8 @@ export class GlmProvider extends BaseProvider {
       }
     } finally {
       reader.releaseLock?.();
-      // 删除会话（默认开启）
-      if (conversationId && !errorEncountered) {
+      // CLI 默认保留会话（keepSession=true），仅在明确要求删除时才清理
+      if (conversationId && !errorEncountered && !keepSession) {
         await this._deleteConversation(account, conversationId, assistantId).catch(() => {});
       }
     }
@@ -794,10 +797,11 @@ export class GlmProvider extends BaseProvider {
       throw err;
     }
 
-    // 将 account 和 assistantId 附加到 response 上，供调用方清理会话
+    // 将 account / assistantId / keepSession 附加到 response 上，供调用方清理会话
     resp._account = account;
     resp._assistantId = assistantId;
     resp._conversationId = "";
+    resp._keepSession = options.keepSession === true;
     resp._provider = this;
 
     return resp;

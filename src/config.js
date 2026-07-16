@@ -79,6 +79,7 @@ export function getChatOptions(providerName) {
   return {
     thinkingEnabled: providerOpts.thinkingEnabled ?? chatOpts._global?.thinkingEnabled ?? true,
     enableSearch: providerOpts.enableSearch ?? chatOpts._global?.enableSearch ?? false,
+    keepSession: providerOpts.keepSession ?? chatOpts._global?.keepSession ?? true,
   };
 }
 

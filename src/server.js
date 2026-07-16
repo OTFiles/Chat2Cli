@@ -244,13 +244,27 @@ async function handleChatCompletions(req, res) {
       sendJson(res, 200, collected);
     }
 
-    // GLM 会话清理
+    // 会话清理：server 模式默认删除（keepSession 默认 false）
+    // 可通过请求头 X-Keep-Session: true 覆盖
+    const keepSessionHeader = (req.headers["x-keep-session"] || "").toLowerCase();
+    const explicitKeep = keepSessionHeader === "true" || keepSessionHeader === "1";
+
     if (providerName === "glm" && result._provider && glmConversationId) {
-      result._provider._deleteConversation(
-        result._account,
-        glmConversationId,
-        result._assistantId
-      ).catch(() => {});
+      const shouldKeep = explicitKeep || result._keepSession === true;
+      if (!shouldKeep) {
+        result._provider._deleteConversation(
+          result._account,
+          glmConversationId,
+          result._assistantId
+        ).catch(() => {});
+      }
+    }
+
+    if (providerName === "qwen" && result._provider && result._sessionId) {
+      const shouldKeep = explicitKeep || result._keepSession === true;
+      if (!shouldKeep) {
+        result._provider.deleteChatSession(result._sessionId).catch(() => {});
+      }
     }
   } catch (err) {
     if (!res.headersSent) {
