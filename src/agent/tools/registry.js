@@ -330,11 +330,13 @@ function searchByFilename(baseDir, pattern, cwd) {
 }
 
 function searchByContent(baseDir, pattern, cwd) {
-  const { execSync: es } = require("node:child_process");
   try {
     // 排除 node_modules、.git 和二进制文件
-    const cmd = `grep -rnI --include='*.{js,ts,json,md,txt,yml,yaml,html,css,py,sh}' -e '${pattern.replace(/'/g, "'\\''")}' '${baseDir}' 2>/dev/null | head -200`;
-    const stdout = es(cmd, { cwd, timeout: 30000, maxBuffer: 5 * 1024 * 1024, encoding: "utf8" });
+    const safePattern = pattern.replace(/'/g, "'\\''");
+    const includes = ["*.js","*.ts","*.json","*.md","*.txt","*.yml","*.yaml","*.html","*.css","*.py","*.sh"]
+      .map(ext => `--include='${ext}'`).join(" ");
+    const cmd = `grep -rnI ${includes} -e '${safePattern}' '${baseDir}' 2>/dev/null | head -200`;
+    const stdout = execSync(cmd, { cwd, timeout: 30000, maxBuffer: 5 * 1024 * 1024, encoding: "utf8" });
     const lines = stdout.trim().split("\n").filter(Boolean);
     const results = lines.map((line) => {
       const idx = line.indexOf(":");
