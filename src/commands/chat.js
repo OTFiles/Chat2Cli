@@ -57,17 +57,55 @@ async function loadRemoteSessionMessages(provider, account, sessionId, providerN
   try {
     if (providerName === "qwen") {
       const detail = await provider.getSessionDetail(sessionId, account.id);
-      // Qwen session detail: { data: { messages: [...] } } or { messages: [...] }
+      // Qwen: chat.messages 是存根列表(content="")，真正内容在 chat.history.messages (ID→内容映射)
       const raw = detail?.data || detail;
-      const msgs = Array.isArray(raw?.messages) ? raw.messages : [];
-      // Normalize: extract role + content
-      const messages = msgs.map(m => ({
-        role: m.role || "user",
-        content: typeof m.content === "string" ? m.content : (m.content?.text || ""),
-      })).filter(m => m.content);
+      const chatObj = raw?.chat;
+      const historyMap = chatObj?.history?.messages || {}; // 完整消息内容 (ID→消息)
+      const stubList = chatObj?.messages;                   // 有序存根列表
+      // 用 stubList 保持顺序，从 historyMap 补全 content（AI 消息 content 在 content_list 中）
+      const msgs = Array.isArray(stubList)
+        ? stubList.map(s => (historyMap[s.id] ? { ...s, ...historyMap[s.id] } : s))
+        : Object.values(historyMap);
+      // Normalize
+      const messages = [];
+      for (const m of msgs) {
+        const role = m.role || m.sender || "user";
+        let content = "";
+        let thinking = "";
+        if (typeof m.content === "string" && m.content) {
+          content = m.content;
+        } else if (Array.isArray(m.content_list)) {
+          // AI 消息内容在 content_list 中，尝试按 type 分离 think/response
+          const thinkParts = [];
+          const textParts = [];
+          for (const c of m.content_list) {
+            const txt = c?.content || c?.text || "";
+            if (c?.phase === "think") {
+              thinkParts.push(txt);
+            } else {
+              textParts.push(txt);
+            }
+          }
+          if (thinkParts.length > 0 && textParts.length === 0) {
+            // 全是 thinking，没有正文（可能是纯思考的回复）
+            thinking = thinkParts.join("");
+            content = thinkParts.join("");
+          } else {
+            thinking = thinkParts.join("");
+            content = textParts.join("");
+          }
+        } else if (Array.isArray(m.content)) {
+          content = m.content.map(c => c?.text || c?.content || "").join("");
+        } else if (m.content?.text) {
+          content = m.content.text;
+        } else if (m.text) {
+          content = m.text;
+        }
+        if (content) messages.push({ role, content, thinking: thinking || undefined });
+      }
       // Find last assistant message response_id for parentMessageId
       const lastAssistant = [...msgs].reverse().find(m => m.role === "assistant");
-      const currentMessageId = lastAssistant?.response_id || lastAssistant?.id || null;
+      const currentMessageId = lastAssistant?.response_id || lastAssistant?.id || raw?.currentId || raw?.currentResponseIds?.[0] || null;
       return { messages, currentMessageId };
     }
     // DeepSeek
