@@ -6,6 +6,12 @@ import { join, relative, resolve, dirname, basename } from "node:path";
 //  工具注册表
 // ═══════════════════════════════════════════════
 
+/** 用于追踪内置工具名称（扩展工具冲突检测） */
+const builtinToolNames = new Set();
+
+/** 自定义工具执行器注册表 */
+const toolExecutors = new Map();
+
 /** 所有工具的元数据定义（用于注入 AI 提示词） */
 export const TOOL_DEFINITIONS = [
   {
@@ -62,6 +68,38 @@ export function getToolDefinition(name) {
   return TOOL_DEFINITIONS.find((t) => t.name === name) || null;
 }
 
+/**
+ * 注册新工具定义（扩展工具）
+ * @param {object} definition - { name, description, parameters }
+ */
+export function registerTool(definition) {
+  if (!definition || !definition.name) return;
+  if (builtinToolNames.has(definition.name)) {
+    console.warn(`[工具] 扩展工具 "${definition.name}" 与内置同名，已跳过`);
+    return;
+  }
+  if (TOOL_DEFINITIONS.some((t) => t.name === definition.name)) {
+    console.warn(`[工具] 工具 "${definition.name}" 已存在，已跳过`);
+    return;
+  }
+  TOOL_DEFINITIONS.push(definition);
+}
+
+/**
+ * 注册工具执行器
+ * @param {string} name - 工具名
+ * @param {Function} fn - 执行函数 (params, context) => { result, requiresApproval? }
+ */
+export function registerToolExecutor(name, fn) {
+  if (!name || typeof fn !== "function") return;
+  toolExecutors.set(name, fn);
+}
+
+/** 获取内置工具名称集合（用于扩展冲突检测） */
+export function getBuiltinToolNames() {
+  return new Set(builtinToolNames);
+}
+
 // ═══════════════════════════════════════════════
 //  工具执行函数
 // ═══════════════════════════════════════════════
@@ -74,6 +112,17 @@ export function getToolDefinition(name) {
  * @returns {{ result: any, requiresApproval?: boolean }}
  */
 export async function executeToolCall(toolName, params, context = {}) {
+  // 优先查扩展执行器
+  const extExecutor = toolExecutors.get(toolName);
+  if (extExecutor) {
+    try {
+      return await extExecutor(params, context);
+    } catch (err) {
+      return { result: { error: `扩展工具执行失败: ${err.message}` } };
+    }
+  }
+
+  // 内置工具
   switch (toolName) {
     case "shell":
       return executeShell(params, context);
@@ -401,4 +450,9 @@ function executeTodo(params, context) {
   }
 
   return { result: { error: `未知 action: ${action}，支持 list 和 update` } };
+}
+
+// ── 初始化内置工具名集合 ──
+for (const t of TOOL_DEFINITIONS) {
+  builtinToolNames.add(t.name);
 }

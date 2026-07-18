@@ -12,6 +12,8 @@ process.on("unhandledRejection", (reason) => {
 
 import { Command } from "commander";
 import chalk from "chalk";
+import { initProviders } from "../src/providers/registry.js";
+import { initExtensions } from "../src/extensions/index.js";
 import { runLogin } from "../src/commands/login.js";
 import { runChat } from "../src/commands/chat.js";
 import { runHistory } from "../src/commands/history.js";
@@ -19,6 +21,21 @@ import { runConfig } from "../src/commands/config.js";
 import { runApiKey } from "../src/commands/apikey.js";
 import { runServe } from "../src/commands/serve.js";
 import { runAgent } from "../src/commands/agent.js";
+
+// 初始化 Provider（在扩展加载前，用于冲突检测）
+initProviders();
+
+// 初始化扩展系统（异步，在 CLI 解析前执行）
+let _extReady = null;
+function ensureExtensions() {
+  if (!_extReady) {
+    _extReady = initExtensions({ cwd: process.cwd() }).catch((err) => {
+      console.warn("[扩展] 初始化失败:", err.message);
+      return { hooks: { emit: async () => ({}) }, loaded: [], promptSections: { main: [], aux: [] } };
+    });
+  }
+  return _extReady;
+}
 
 const program = new Command();
 
@@ -247,5 +264,45 @@ ${chalk.dim("快捷键:")}
       process.exit(1);
     }
   });
+
+// ── 注册扩展 CLI 命令 ──
+// 在 parse 前动态注册，使 commander 能识别它们
+const _extCtx = await ensureExtensions();
+const { getExtensionCommands } = await import("../src/extensions/index.js");
+const extCommands = getExtensionCommands();
+
+// 获取已注册的命令名（避免冲突）
+const registeredNames = new Set(program.commands.map((c) => c.name()));
+
+for (const cmd of extCommands) {
+  if (registeredNames.has(cmd.name)) {
+    console.warn(`[扩展] 命令 "${cmd.name}" 与内置命令冲突，已跳过`);
+    continue;
+  }
+
+  const sub = program
+    .command(cmd.name)
+    .description(cmd.description || "");
+
+  if (Array.isArray(cmd.options)) {
+    for (const opt of cmd.options) {
+      sub.option(opt.flags, opt.description || "", opt.defaultValue);
+    }
+  }
+
+  sub.action(async (...args) => {
+    try {
+      // 最后一个参数是 commander Command 对象
+      const cmdObj = args[args.length - 1];
+      const opts = typeof cmdObj === "object" && cmdObj.opts ? cmdObj.opts() : {};
+      await cmd.handler(opts, ...args.slice(0, -1));
+    } catch (err) {
+      process.stderr.write(chalk.red("错误: " + err.message + "\n"));
+      process.exit(1);
+    }
+  });
+
+  registeredNames.add(cmd.name);
+}
 
 program.parse();

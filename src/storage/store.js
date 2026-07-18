@@ -15,7 +15,11 @@ function defaultState() {
     },
     providers: {},
     apiKeys: [],
-    conversations: []
+    conversations: [],
+    extensions: {
+      paths: [],
+      disabled: []
+    }
   };
 }
 
@@ -30,6 +34,14 @@ function normalizeApiKeys(value) {
     toolCallsEnabled: Boolean(k.toolCallsEnabled),
     createdAt: k.createdAt || new Date().toISOString()
   }));
+}
+
+function normalizeExtensions(value) {
+  if (!value || typeof value !== "object") return { paths: [], disabled: [] };
+  return {
+    paths: Array.isArray(value.paths) ? value.paths.filter(Boolean) : [],
+    disabled: Array.isArray(value.disabled) ? value.disabled.filter(Boolean) : []
+  };
 }
 
 function normalizeConversations(value) {
@@ -55,7 +67,8 @@ function normalizeState(value) {
     },
     providers: value.providers && typeof value.providers === "object" ? value.providers : {},
     apiKeys: normalizeApiKeys(value.apiKeys),
-    conversations: normalizeConversations(value.conversations)
+    conversations: normalizeConversations(value.conversations),
+    extensions: normalizeExtensions(value.extensions)
   };
 }
 

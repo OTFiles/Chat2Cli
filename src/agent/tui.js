@@ -14,7 +14,8 @@ import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
  * @param {object} context - { mainProvider, auxProvider, composite, workingDir, mainModel, auxModel }
  */
 export async function agentTui(context) {
-  const { composite, mainProvider, auxProvider, workingDir, mainModel, auxModel } = context;
+  const { composite, mainProvider, auxProvider, workingDir, mainModel, auxModel,
+    hooks, extTuiCommands = [] } = context;
 
   // 显示头部（含 CHAT2CLI logo）
   printAgentHeader({
@@ -623,6 +624,7 @@ export async function agentTui(context) {
     try {
       for await (const event of runAgentLoop(input, {
         ...context,
+        hooks,
         signal: abortController.signal
       })) {
         renderAgentEvent(event, mainProvider, auxProvider);
@@ -641,6 +643,21 @@ export async function agentTui(context) {
   async function handleCommand(input) {
     const parts = input.trim().split(/\s+/);
     const cmd = parts[0].toLowerCase();
+
+    // 先查扩展 TUI 命令
+    for (const extCmd of extTuiCommands) {
+      const extName = "/" + (extCmd.name || "");
+      if (cmd === extName.toLowerCase()) {
+        printUserMsg(input);
+        try {
+          const args = input.slice(extName.length).trim();
+          await extCmd.handler(args, { composite, workingDir, mainProvider, auxProvider });
+        } catch (err) {
+          process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
+        }
+        return;
+      }
+    }
 
     switch (cmd) {
       case "/exit":
@@ -1160,6 +1177,11 @@ function visualWidth(s) {
 // ── 帮助 ──
 
 function printAgentHelp() {
+  // 扩展 TUI 命令的列表行
+  const extLines = extTuiCommands.length > 0
+    ? extTuiCommands.map((c) => `    /${c.name.padEnd(14)} ${c.description || ""}`).join("\n")
+    : "    (无)";
+
   process.stdout.write(chalk.gray(`
   内置命令:
     /help          显示帮助
@@ -1168,6 +1190,9 @@ function printAgentHelp() {
     /todo          查看任务清单
     /context       查看当前对话上下文
     /aux <任务>    委托任务给辅助 AI
+
+  扩展命令:
+${extLines}
 
   快捷键:
     Ctrl+C         中断当前 agent 循环

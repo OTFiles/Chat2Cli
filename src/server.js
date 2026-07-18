@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { initProviders, getProvider, listProviders } from "./providers/registry.js";
+import { initExtensions } from "./extensions/index.js";
 import { getStore } from "./storage/store.js";
 import { getConfig } from "./config.js";
 import {
@@ -380,8 +381,20 @@ async function handleImagesEdits(req, res) {
   }
 }
 
-export function createApiServer() {
+export async function createApiServer() {
   initProviders();
+
+  // ── 初始化扩展（加载扩展 provider、路由等）──
+  let extCtx = null;
+  try {
+    extCtx = await initExtensions({ cwd: process.cwd() });
+  } catch (err) {
+    console.warn("[扩展] 初始化失败:", err.message);
+  }
+
+  const extRoutes = extCtx
+    ? (await import("./extensions/index.js")).getExtensionRoutes()
+    : [];
 
   return createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -397,6 +410,16 @@ export function createApiServer() {
         sendJson(res, 200, { product: "chat2cli API Server", version: "1.0.0" });
         return;
       }
+
+      // ── 扩展路由（优先检查，允许扩展覆盖 /v1/* 下的自定义端点）──
+      for (const route of extRoutes) {
+        if (url.pathname === route.path && req.method === route.method) {
+          await route.handler(req, res);
+          return;
+        }
+      }
+
+      // ── 内置路由 ──
       if (url.pathname === "/v1/models" && req.method === "GET") {
         await handleModels(req, res);
         return;

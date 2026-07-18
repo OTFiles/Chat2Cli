@@ -5,7 +5,7 @@ import { getStore } from "../storage/store.js";
 export async function runServe(opts = {}) {
   const port = Number(opts.port || process.env.PORT || 3000);
 
-  const server = createApiServer();
+  const server = await createApiServer();
 
   server.listen(port, () => {
     const state = getStore();

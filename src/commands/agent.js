@@ -1,10 +1,23 @@
 import inquirer from "inquirer";
 import chalk from "chalk";
 import { initProviders, getProvider } from "../providers/registry.js";
+import { initExtensions } from "../extensions/index.js";
 import { getConfig, getAgentConfig, setAgentConfigKey } from "../config.js";
 import { printSuccess, printError, printInfo, printTable, formatDate, accountLabel } from "../utils/format.js";
 import { listComposites, createComposite, getComposite, deleteComposite, setModels } from "../agent/storage/composite.js";
 import { agentTui } from "../agent/tui.js";
+
+// 扩展系统（延迟初始化）
+let _extContext = null;
+async function getExtContext() {
+  if (!_extContext) {
+    _extContext = await initExtensions({ cwd: process.cwd() }).catch((err) => {
+      console.warn("[扩展] 初始化失败:", err.message);
+      return { hooks: { emit: async () => ({}) }, loaded: [], promptSections: { main: [], aux: [] } };
+    });
+  }
+  return _extContext;
+}
 
 /**
  * 从已登录账号中选取一个 provider 和账号
@@ -87,6 +100,9 @@ async function selectModel(provider, role, preferredModel) {
 
 export async function runAgent(opts = {}) {
   initProviders();
+
+  // ── 初始化扩展（加载工具、钩子、提示词片段）──
+  const extCtx = await getExtContext();
 
   // ── 列表模式 ──
   if (opts.list) {
@@ -227,7 +243,12 @@ export async function runAgent(opts = {}) {
     auxModel,
     workingDir: composite.workingDir || process.cwd(),
     shellTimeout: opts.timeout ?? 120000,
-    maxTokens: opts.maxTokens ?? 1000000
+    maxTokens: opts.maxTokens ?? 1000000,
+    hooks: extCtx?.hooks,
+    extTuiCommands: await (async () => {
+      const { getExtensionTuiCommands } = await import("../extensions/index.js");
+      return getExtensionTuiCommands();
+    })()
   });
 }
 

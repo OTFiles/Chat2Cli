@@ -7,6 +7,7 @@ import { executeToolCall, TOOL_DEFINITIONS } from "./tools/registry.js";
 import { buildMainSystemPrompt } from "./prompts/main-system.js";
 import { buildAuxSystemPrompt } from "./prompts/aux-system.js";
 import { appendMessage, updateTaskList, saveComposite } from "./storage/composite.js";
+import { getExtensionPromptSections } from "../extensions/index.js";
 import { existsSync, mkdirSync, createWriteStream } from "node:fs";
 import { join, extname } from "node:path";
 import { createHash } from "node:crypto";
@@ -134,11 +135,23 @@ function formatToolResultCompact(toolName, result) {
 // ── 消息构建 ──
 
 function buildMessagesForMain(composite, workingDir) {
-  const systemPrompt = buildMainSystemPrompt({
+  // 合并内置工具 + 扩展工具（TOOL_DEFINITIONS 已在 initExtensions 时扩充）
+  const allTools = TOOL_DEFINITIONS;
+
+  // 获取扩展提示词片段
+  const extSections = getExtensionPromptSections("main");
+
+  let systemPrompt = buildMainSystemPrompt({
     workingDir,
     taskList: composite.taskList || [],
-    toolDefinitions: TOOL_DEFINITIONS
+    toolDefinitions: allTools
   });
+
+  // 追加扩展提示词片段
+  if (extSections.length > 0) {
+    systemPrompt += "\n\n" + extSections.join("\n\n");
+  }
+
   const messages = [{ role: "system", content: systemPrompt }];
   const recentMessages = (composite.messages || []).slice(-40);
   for (const msg of recentMessages) {
@@ -155,8 +168,18 @@ function buildMessagesForMain(composite, workingDir) {
 }
 
 function buildMessagesForAux(composite, workingDir, task) {
+  const allTools = TOOL_DEFINITIONS;
+  const extSections = getExtensionPromptSections("aux");
+
+  let systemPrompt = buildAuxSystemPrompt({ workingDir, toolDefinitions: allTools });
+
+  // 追加扩展提示词片段（辅助 AI）
+  if (extSections.length > 0) {
+    systemPrompt += "\n\n" + extSections.join("\n\n");
+  }
+
   return [
-    { role: "system", content: buildAuxSystemPrompt({ workingDir, toolDefinitions: TOOL_DEFINITIONS }) },
+    { role: "system", content: systemPrompt },
     { role: "user", content: task }
   ];
 }
@@ -412,6 +435,18 @@ export async function* runAgentLoop(userInput, context) {
             params = typeof call.input === "string" ? JSON.parse(call.input) : (call.input || {});
           } catch { params = {}; }
 
+          // ── 钩子: pre:tool_execute ──
+          if (context.hooks) {
+            const hookResult = await context.hooks.emit("pre:tool_execute", { toolName, params }, { cwd: workingDir });
+            if (hookResult.blocked) {
+              yield { type: "info", text: `工具 ${toolName} 被扩展阻止: ${hookResult.reason}` };
+              continue;
+            }
+            if (hookResult.modified) {
+              params = hookResult.payload?.params || params;
+            }
+          }
+
           yield { type: "tool_start", toolName, toolParams: params };
 
           const toolResult = await executeToolCall(toolName, params, {
@@ -419,6 +454,17 @@ export async function* runAgentLoop(userInput, context) {
             taskList: composite.taskList || [],
             shellTimeout
           });
+
+          // ── 钩子: post:tool_execute ──
+          if (context.hooks) {
+            const postResult = await context.hooks.emit("post:tool_execute",
+              { toolName, params, result: toolResult.result },
+              { cwd: workingDir }
+            );
+            if (postResult.modified && postResult.payload?.result) {
+              toolResult.result = postResult.payload.result;
+            }
+          }
 
           if (toolResult.requiresApproval) {
             yield { type: "tool_start", toolName, requiresApproval: true, toolResult: toolResult.result };
