@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import { initProviders, getProvider, listProviders } from "../providers/registry.js";
+import { initExtensions, createHookSystem } from "../extensions/index.js";
 import { getConfig, getModelForProvider, setModelForProvider, getChatOptions, setChatOption } from "../config.js";
 import { getStore, updateStore } from "../storage/store.js";
 import { createId } from "../utils/id.js";
@@ -482,6 +483,8 @@ async function streamResponse(provider, messages, opts) {
   let sessionId = null;
   // 流式 markdown 行缓冲
   let mdLineBuf = "";
+  // hooks
+  const hooks = opts.hooks || null;
 
   for await (const delta of provider.chat(messages, opts)) {
     // 内部元数据
@@ -489,6 +492,10 @@ async function streamResponse(provider, messages, opts) {
     if (delta.kind === "__sessionId") { sessionId = delta.text; continue; }
 
     if (firstChunk) {
+      // ── 钩子: pre:response_start（扩展可在 AI 输出前打印时间等）──
+      if (hooks) {
+        await hooks.emit("pre:response_start", { model: opts.model }, {});
+      }
       if (opts.model?.includes("reasoner")) {
         printThinkingLabel();
       }
@@ -1178,7 +1185,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
 
       const chatOpts = getChatOptions(provider.name);
       const result = await streamResponse(
-        provider, messages, { model: currentModel, accountId, sessionId, parentMessageId, markdown, ...chatOpts, ...chatOverrides }
+        provider, messages, { model: currentModel, accountId, sessionId, parentMessageId, markdown, ...chatOpts, ...chatOverrides, hooks: chatOverrides.hooks }
       ).catch((err) => {
         process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
         return null;
@@ -1275,7 +1282,7 @@ async function runInteractiveChat(provider, opts = {}) {
     printChatHeader(chatProvider.label, currentModel, convId.slice(0, 8));
     const messages = [];
     const sessionRef = { sessionId: null, messageId: null };
-    await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown, {}, sessionRef);
+    await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown, { hooks: opts.hooks }, sessionRef);
     if (messages.length > 0) {
       const conv = {
         id: convId, provider: chatProvider.name, model: currentModel,
@@ -1301,7 +1308,7 @@ async function runInteractiveChat(provider, opts = {}) {
     printChatHeader(chatProvider.label, currentModel, convId.slice(0, 8));
     const messages = [];
     const sessionRef = { sessionId: null, messageId: null };
-    await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown, {}, sessionRef);
+    await chatLoop(chatProvider, messages, currentModel, accountId, null, null, useMarkdown, { hooks: opts.hooks }, sessionRef);
 
     if (messages.length > 0) {
       const conv = {
@@ -1327,7 +1334,7 @@ async function runInteractiveChat(provider, opts = {}) {
     echoMessages(messages, useMarkdown);
 
     const sessionRef = { sessionId: conv.dsSessionId || null, messageId: conv.parentMessageId || null };
-    await chatLoop(chatProvider, messages, currentModel, convAccountId, conv.dsSessionId || null, conv.parentMessageId || null, useMarkdown, {}, sessionRef);
+    await chatLoop(chatProvider, messages, currentModel, convAccountId, conv.dsSessionId || null, conv.parentMessageId || null, useMarkdown, { hooks: opts.hooks }, sessionRef);
 
     if (messages.length > conv.messages.length) {
       updateStore((state) => ({
@@ -1354,7 +1361,7 @@ async function runInteractiveChat(provider, opts = {}) {
     printChatHeader(chatProvider.label, currentModel, sessionId.slice(0, 8));
     echoMessages(messages, useMarkdown);
 
-    await chatLoop(chatProvider, messages, currentModel, remoteAccountId, sessionId, parentMsgId, useMarkdown);
+    await chatLoop(chatProvider, messages, currentModel, remoteAccountId, sessionId, parentMsgId, useMarkdown, { hooks: opts.hooks });
 
     if (messages.length > picked.messages.length) {
       // 保存到本地（暂存为本地对话副本）
@@ -1381,7 +1388,7 @@ async function runOneshotChat(provider, message, opts = {}) {
 
   printUserMsg(message);
 
-  const result = await streamResponse(provider, messages, { model: currentModel }).catch((err) => {
+  const result = await streamResponse(provider, messages, { model: currentModel, hooks: opts.hooks }).catch((err) => {
     process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
     return null;
   });
@@ -1402,8 +1409,18 @@ export { chatLoop, echoMessages, formatTime };
 
 export async function runChat(opts = {}) {
   initProviders();
+
+  // ── 初始化扩展（加载钩子、提示词片段等）──
+  let hooks = null;
+  try {
+    const extCtx = await initExtensions({ cwd: process.cwd() });
+    hooks = extCtx?.hooks || null;
+  } catch (err) {
+    // 扩展失败不阻塞正常流程
+  }
+
   const provider = resolveProvider();
   if (!provider) { printError("未找到可用的服务商。请先运行: chat2cli login"); return; }
-  if (opts.message) await runOneshotChat(provider, opts.message, opts);
-  else await runInteractiveChat(provider, opts);
+  if (opts.message) await runOneshotChat(provider, opts.message, { ...opts, hooks });
+  else await runInteractiveChat(provider, { ...opts, hooks });
 }
