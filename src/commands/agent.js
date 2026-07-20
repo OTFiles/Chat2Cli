@@ -278,7 +278,33 @@ async function listAgents() {
 // ── 删除 ──
 
 async function deleteAgent(id) {
-  const composite = getComposite(id);
+  // 先尝试精确/前缀匹配
+  let composite = getComposite(id);
+
+  // 如果精确匹配失败，检查是否有多个前缀匹配 => 让用户选择
+  if (!composite) {
+    const { findCompositesByPrefix } = await import("../agent/storage/composite.js");
+    const matches = findCompositesByPrefix(id);
+    if (matches.length === 0) {
+      printError(`未找到复合对话: ${id}`);
+      return;
+    }
+    if (matches.length > 1) {
+      const ans = await inquirer.prompt([{
+        type: "list",
+        name: "selection",
+        message: `找到多个匹配的复合对话，请选择要删除的:`,
+        choices: matches.map((c) => ({
+          name: `${c.name}  ${chalk.gray(formatDate(c.updatedAt))}  ${chalk.dim(`(${c.messages?.length || 0} 条消息)`)}`,
+          value: c.id
+        }))
+      }]);
+      composite = getComposite(ans.selection);
+    } else {
+      composite = matches[0];
+    }
+  }
+
   if (!composite) {
     printError(`未找到复合对话: ${id}`);
     return;
@@ -296,6 +322,6 @@ async function deleteAgent(id) {
     return;
   }
 
-  deleteComposite(id);
+  deleteComposite(composite.id);
   printSuccess(`已删除: ${composite.name}`);
 }

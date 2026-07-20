@@ -12,6 +12,9 @@ import {
 } from "../utils/format.js";
 import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
+// 输入框背景色：黑色 + 半透明绿色
+const INPUT_BG = chalk.bgRgb(0, 25, 0);
+
 function resolveProvider() {
   return getProvider(getConfig().defaultProvider);
 }
@@ -629,10 +632,10 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
     _drawBorderChat(W, 0, val || "");
     for (let i = 0; i < vis; i++) process.stdout.write("\n");
     _drawBorderChat(W, 1, val || "");
-    process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
+    process.stdout.write("   " + INPUT_BG(chalk.dim("输入 /help 查看帮助")) + "\n");
     const up = 2 + vis;
     process.stdout.write(`\x1b[${up}A\r`);
-    process.stdout.write(PROMPT_CHAT);
+    process.stdout.write(INPUT_BG(PROMPT_CHAT));
     cursorRelLine = 0;
     cursorRelCol = 0;
   }
@@ -642,9 +645,9 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
     if (above > 0) {
       const label = type === 0 ? ` ↑ ${above} more ` : ` ↓ ${above} more `;
       const avail = Math.max(1, W - label.length);
-      process.stdout.write(chalk.dim("─".repeat(avail) + label) + "\n");
+      process.stdout.write(INPUT_BG(chalk.dim("─".repeat(avail) + label)) + "\n");
     } else {
-      process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
+      process.stdout.write(INPUT_BG(chalk.dim("─".repeat(W))) + "\n");
     }
   }
 
@@ -700,7 +703,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
           _drawBorderChat(W, 0, input);
           for (let i = 0; i < newVis; i++) process.stdout.write("\n");
           _drawBorderChat(W, 1, input);
-          process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
+          process.stdout.write("   " + INPUT_BG(chalk.dim("输入 /help 查看帮助")) + "\n");
           const up = 2 + newVis;
           process.stdout.write(`\x1b[${up}A\r`);
           cursorRelLine = 0;
@@ -765,7 +768,7 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
         for (let i = 0; i < vis; i++) {
           if (i < visible.length) {
             const pre = (i === 0 && scrollOffset === 0) ? PROMPT_CHAT : CONT_CHAT;
-            process.stdout.write("\r\x1b[K" + pre + truncateByVisualWidth(visible[i], safeW) + "\n");
+            process.stdout.write("\r\x1b[K" + INPUT_BG(pre) + INPUT_BG(truncateByVisualWidth(visible[i], safeW)) + "\n");
           } else {
             process.stdout.write("\r\x1b[K\n");
           }

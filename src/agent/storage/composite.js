@@ -48,14 +48,29 @@ export function listComposites() {
     .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
 }
 
-/** 获取单个复合对话 */
+/** 按前缀查找复合对话（辅助删除/继续时使用部分 ID） */
+export function findCompositesByPrefix(prefix) {
+  if (!prefix) return [];
+  const lower = prefix.toLowerCase();
+  const all = listComposites();
+  return all.filter((c) => c.id.toLowerCase().startsWith(lower));
+}
+
+/** 获取单个复合对话（支持前缀匹配） */
 export function getComposite(id) {
   if (!id) return null;
+  // 精确匹配
   const p = filePath(id);
-  if (!existsSync(p)) return null;
-  try {
-    return JSON.parse(readFileSync(p, "utf8"));
-  } catch { return null; }
+  if (existsSync(p)) {
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
+    } catch { return null; }
+  }
+  // 前缀匹配
+  const matches = findCompositesByPrefix(id);
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) return null; // 多匹配时由调用方处理
+  return null;
 }
 
 /** 保存/更新复合对话 */
@@ -108,9 +123,20 @@ export function setModels(composite, mainModel, auxModel) {
   return saveComposite(composite);
 }
 
-/** 删除复合对话 */
+/** 删除复合对话（支持前缀匹配） */
 export function deleteComposite(id) {
+  // 精确匹配
   const p = filePath(id);
-  if (existsSync(p)) unlinkSync(p);
-  return true;
+  if (existsSync(p)) {
+    unlinkSync(p);
+    return true;
+  }
+  // 前缀匹配
+  const matches = findCompositesByPrefix(id);
+  if (matches.length === 1) {
+    const mp = filePath(matches[0].id);
+    if (existsSync(mp)) unlinkSync(mp);
+    return true;
+  }
+  return false;
 }
