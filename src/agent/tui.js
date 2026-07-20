@@ -1,14 +1,12 @@
 import chalk from "chalk";
 import { runAgentLoop, runAuxCall } from "./agent-loop.js";
 import {
-  printUserMsg, printThinkingLabel, BOX, termWidth, formatDate,
+  printUserMsg, printThinkingLabel, BOX, termWidth,
   USER_MSG_BG
 } from "../utils/format.js";
-import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
-// 输入框和工具标签背景色：黑色 + 半透明绿色
-const INPUT_BG = USER_MSG_BG;  // 复用统一背景色
-const TOOL_BG = chalk.bgRgb(0, 20, 0);
+const TOOL_BG = chalk.bgRgb(0, 45, 5);
+import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
 // ═══════════════════════════════════════════════
 //  Agent TUI — 复用 chat.js 的 raw mode 输入模式
@@ -19,12 +17,8 @@ const TOOL_BG = chalk.bgRgb(0, 20, 0);
  * @param {object} context - { mainProvider, auxProvider, composite, workingDir, mainModel, auxModel }
  */
 export async function agentTui(context) {
-  const { composite, mainProvider, auxProvider, workingDir,
+  const { composite, mainProvider, auxProvider, workingDir, mainModel, auxModel,
     hooks, extTuiCommands = [] } = context;
-
-  // 可变的模型引用（/model 命令会更新）
-  let mainModel = context.mainModel;
-  let auxModel = context.auxModel;
 
   // 显示头部（含 CHAT2CLI logo）
   printAgentHeader({
@@ -171,16 +165,15 @@ export async function agentTui(context) {
     const vis = visibleInputLines();
     footerVis = vis;
     const W = termWidth();
-    // 清除当前位置到屏底，确保不残留旧内容
+    // 清除当前位置到屏底
     process.stdout.write("\r\x1b[J");
     // 上边框
-    _drawBorder(W, 0, INPUT_BG);
+    _drawBorder(W, 0);
     // 输入行
     for (let i = 0; i < vis; i++) process.stdout.write("\n");
     // 下边框
-    _drawBorder(W, 1, INPUT_BG);
-    // 帮助提示行（带背景色）
-    process.stdout.write("   " + INPUT_BG(chalk.dim("输入 /help 查看帮助")) + "\n");
+    _drawBorder(W, 1);
+    process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
     // 回到 prompt 行
     const up = 2 + vis;
     process.stdout.write(`\x1b[${up}A\r`);
@@ -189,27 +182,22 @@ export async function agentTui(context) {
     cursorRelCol = 0;
   }
 
-  /** type: 0=上边框, 1=下边框，bgColor 可选背景色 */
-  function _drawBorder(W, type, bgColor) {
+  /** type: 0=上边框, 1=下边框 */
+  function _drawBorder(W, type) {
     const above = type === 0 ? scrollOffset : Math.max(0, totalInputLines() - (scrollOffset + visibleInputLines()));
-    const applyBg = bgColor || ((s) => s);
     if (above > 0) {
       const label = type === 0 ? ` ↑ ${above} more ` : ` ↓ ${above} more `;
       const avail = Math.max(1, W - label.length);
-      process.stdout.write(applyBg(chalk.dim("─".repeat(avail) + label)) + "\n");
+      process.stdout.write(chalk.dim("─".repeat(avail) + label) + "\n");
     } else {
-      process.stdout.write(applyBg(chalk.dim("─".repeat(W))) + "\n");
+      process.stdout.write(chalk.dim("─".repeat(W)) + "\n");
     }
   }
 
   function clearFooter() {
-    // 从光标处清除到屏底，覆盖任何残留的旧 footer
-    process.stdout.write("\r\x1b[J");
-  }
-
-  /** Agent 工作中状态：紧凑单行提示 */
-  function showWorkingStatus() {
-    process.stdout.write("   " + chalk.gray("⏳ Agent工作中...") + "  " + chalk.dim("按 Ctrl+C 中断") + "\n\n");
+    // 以当前 footer 高度 + 1 行删到当前下两行
+    process.stdout.write(`\x1b[${footerVis + 1}A`);
+    process.stdout.write(`\x1b[${footerVis + 3}M`);
   }
 
   function redrawPrompt() {
@@ -227,10 +215,10 @@ export async function agentTui(context) {
       const maxOff = Math.max(0, totalInputLines() - newVis);
       if (scrollOffset > maxOff) scrollOffset = maxOff;
       const W = termWidth();
-      _drawBorder(W, 0, INPUT_BG);
+      _drawBorder(W, 0);
       for (let i = 0; i < newVis; i++) process.stdout.write("\n");
-      _drawBorder(W, 1, INPUT_BG);
-      process.stdout.write("   " + INPUT_BG(chalk.dim("输入 /help 查看帮助")) + "\n");
+      _drawBorder(W, 1);
+      process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");
       const up = 2 + newVis;
       process.stdout.write(`\x1b[${up}A\r`);
       cursorRelLine = 0;
@@ -241,10 +229,10 @@ export async function agentTui(context) {
       const W = termWidth();
       // prompt → top border: up 1
       process.stdout.write(`\x1b[1A\r`);
-      _drawBorder(W, 0, INPUT_BG);
+      _drawBorder(W, 0);
       // top border → bottom border: down vis (现在在 prompt 行，再往下 vis 行到 bottom border)
       process.stdout.write(`\x1b[${newVis}E\r`);
-      _drawBorder(W, 1, INPUT_BG);
+      _drawBorder(W, 1);
       // bottom border → prompt: up (vis + 1)，因为 _drawBorder 末尾的 \n 让光标在 help 行
       process.stdout.write(`\x1b[${newVis + 1}A\r`);
     }
@@ -270,7 +258,7 @@ export async function agentTui(context) {
       for (let i = 0; i < vis; i++) {
         if (i < visible.length) {
           const pre = (i === 0 && scrollOffset === 0) ? PROMPT : CONT;
-          process.stdout.write("\r\x1b[K" + INPUT_BG(pre) + INPUT_BG(truncateByVisualWidth(visible[i], safeW)) + "\n");
+          process.stdout.write("\r\x1b[K" + pre + truncateByVisualWidth(visible[i], safeW) + "\n");
         } else {
           process.stdout.write("\r\x1b[K\n");
         }
@@ -410,15 +398,16 @@ export async function agentTui(context) {
 
       // Enter：展开标记后发送
       if (code === 13) {
+        clearFooter();
         const raw = currentInput.trim();
         const input = expandMarkers(raw);
         // 清理粘贴存储
         for (const k of Object.keys(pasteStore)) delete pasteStore[k];
         nextPasteId = 1;
         currentInput = ""; cursor = 0;
-        // 清除当前行及以下，确保不残留旧 footer 内容
         process.stdout.write("\r\x1b[J\n");
         if (input) {
+          // 历史存原始文本（含标记），导航时标记作为普通文本显示
           inputHistory.push(raw); histIdx = -1;
           handleInput(input);
         } else {
@@ -610,9 +599,6 @@ export async function agentTui(context) {
       return;
     }
 
-    // 清除当前 footer 区域（使用稳健的清除方式）
-    process.stdout.write("\r\x1b[J");
-
     // 显示用户消息
     printUserMsg(input.length > 500 ? `[共 ${input.length} 个字符]` : input);
     resetMarkdownRenderer();
@@ -624,9 +610,8 @@ export async function agentTui(context) {
     }
     abortController = new AbortController();
 
-    // 进入工作状态：锁定输入，显示紧凑状态提示
+    // 进入工作状态：锁定输入
     agentWorking = true;
-    showWorkingStatus();
 
     try {
       for await (const event of runAgentLoop(input, {
@@ -640,7 +625,7 @@ export async function agentTui(context) {
       process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
     }
 
-    // 退出工作状态，重绘 footer
+    // 退出工作状态
     agentWorking = false;
     abortController = null;
     drawFooter();
@@ -690,89 +675,6 @@ export async function agentTui(context) {
           workingDir: workingDir || composite.workingDir
         });
         break;
-
-      case "/models": {
-        printUserMsg(input);
-        const models = mainProvider.getModels();
-        for (const m of models) {
-          const eq = m.id === mainModel ? chalk.green("   * ") : "     ";
-          process.stdout.write(eq + chalk.bold(m.id) + "  " + chalk.gray(m.label || "") + "\n");
-        }
-        process.stdout.write("\n");
-        break;
-      }
-
-      case "/model": {
-        const modelName = parts[1];
-        if (!modelName) {
-          process.stdout.write("   " + chalk.yellow("用法: /model <模型名>  例: /model deepseek-chat\n\n"));
-          break;
-        }
-        printUserMsg(input);
-        const validModels = mainProvider.getModels();
-        if (validModels.some((m) => m.id === modelName)) {
-          // 更新 composite 中的模型
-          composite.mainModel = modelName;
-          const { saveComposite } = await import("../agent/storage/composite.js");
-          saveComposite(composite);
-          // 持久化到配置
-          const { setModelForProvider } = await import("../config.js");
-          setModelForProvider(mainProvider.name, modelName);
-          process.stdout.write("   " + chalk.green("✓ ") + `模型已切换为: ${chalk.bold(modelName)}` + chalk.gray("  (已保存)") + "\n\n");
-          // 更新本地变量
-          mainModel = modelName;
-        } else {
-          process.stdout.write("   " + chalk.red("✗ ") + `未知模型: ${modelName}  使用 /models 查看可用模型\n\n`);
-        }
-        break;
-      }
-
-      case "/switch": {
-        printUserMsg(input);
-        const { listComposites, getComposite } = await import("../agent/storage/composite.js");
-        const allComps = listComposites();
-        if (allComps.length === 0) {
-          process.stdout.write("   " + chalk.gray("没有历史复合对话，输入内容开始新对话\n\n"));
-          break;
-        }
-        process.stdout.write("   " + chalk.bold("历史复合对话:\n"));
-        for (let i = 0; i < Math.min(allComps.length, 20); i++) {
-          const c = allComps[i];
-          const t = (c.name || "未命名").slice(0, 45);
-          const tm = formatDate(c.updatedAt);
-          const msgCount = c.messages?.length || 0;
-          process.stdout.write(`     ${chalk.cyan(String(i + 1).padStart(2))} ${t}  ${chalk.dim(tm)}  (${msgCount} 条)\n`);
-        }
-        process.stdout.write(`     ${chalk.cyan(" 0")} 新对话\n`);
-        process.stdout.write(chalk.gray("   输入 /conv <序号> 切换  (例: /conv 1)\n\n"));
-        break;
-      }
-
-      case "/conv": {
-        const num = parseInt(parts[1], 10);
-        const { listComposites, getComposite } = await import("../agent/storage/composite.js");
-        const allComps = listComposites();
-        printUserMsg(input);
-        if (num === 0) {
-          // 新建对话
-          const { createComposite } = await import("../agent/storage/composite.js");
-          const newComp = createComposite({ workingDir: workingDir || composite.workingDir });
-          process.stdout.write("   " + chalk.green("✓ ") + `已开始新对话: ${chalk.bold(newComp.name)}\n\n`);
-        } else if (num > 0 && num <= allComps.length) {
-          const target = getComposite(allComps[num - 1].id);
-          if (target) {
-            // 更新 context.composite 引用——但实际 handleCommand 是闭包引用
-            // 修改 composite 的字段值
-            Object.assign(composite, target);
-            process.stdout.write("   " + chalk.green("✓ ") + `已切换到: ${chalk.bold(target.name)}\n\n`);
-          } else {
-            process.stdout.write("   " + chalk.red("✗ ") + `无法加载对话 #${num}\n\n`);
-          }
-        } else {
-          process.stdout.write("   " + chalk.red("✗ ") + `无效序号: ${num}  使用 /switch 查看列表\n\n`);
-        }
-        break;
-      }
 
       case "/todo":
         printUserMsg(input);
@@ -917,27 +819,23 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
       const fill = " ".repeat(W);
       const label = toolLabel(event.toolName, event.toolParams);
       const prefix = "   " + chalk.dim(label);
-      const prefixVW = 3 + visualWidth(label);
-      const padding = Math.max(0, W - prefixVW);
+      const pad = Math.max(0, W - 3 - visualWidth(label));
       process.stdout.write("\n" + TOOL_BG(fill) + "\n");
-      process.stdout.write(TOOL_BG(prefix + " ".repeat(padding)) + "\n");
+      process.stdout.write(TOOL_BG(prefix + " ".repeat(pad)) + "\n");
       process.stdout.write(TOOL_BG(fill) + "\n");
       break;
     }
 
     case "tool_result": {
       // 覆盖 tool_start 的 3 行绿色背景块
-      // ↑3 到第 1 行空白，重写：空白 + done 标签 + 空白
       process.stdout.write("\x1b[3A\r\x1b[J");
       const W = termWidth();
       const fill = " ".repeat(W);
       const doneLabel = toolDoneLabel(event.toolName, event.toolResult);
       const doneClean = doneLabel.replace(/\x1b\[[0-9;]*m/g, "");
-      const doneVW = 3 + visualWidth(doneClean);
-      const padW = Math.max(0, W - doneVW);
+      const pad = Math.max(0, W - 3 - visualWidth(doneClean));
       process.stdout.write(TOOL_BG(fill) + "\n");
-      process.stdout.write(TOOL_BG("   " + doneLabel + " ".repeat(padW)) + "\n");
-      // 第 3 行：先输出结果内容再补空白背景收尾
+      process.stdout.write(TOOL_BG("   " + doneLabel + " ".repeat(pad)) + "\n");
       renderToolResultLines(event.toolName, event.toolResult);
       process.stdout.write(TOOL_BG(fill) + "\n\n");
       break;
@@ -1295,10 +1193,6 @@ function printAgentHelp() {
     /todo          查看任务清单
     /context       查看当前对话上下文
     /aux <任务>    委托任务给辅助 AI
-    /models        列出可用模型
-    /model <名>    切换模型 (例: /model deepseek-chat)
-    /switch        列出历史对话
-    /conv <序号>   切换到指定对话
 
   扩展命令:
 ${extLines}

@@ -1,7 +1,7 @@
 import chalk from "chalk";
 
-// ── Shared background: 黑色底 + 半透明绿色 ──
-export const USER_MSG_BG = chalk.bgRgb(0, 25, 0);
+// ── 用户消息背景色：深色底 + 绿色 ──
+export const USER_MSG_BG = chalk.bgRgb(0, 55, 10);
 
 // ── Box drawing ──
 
@@ -188,17 +188,14 @@ export function printFooter() {
 export function printUserMsg(text) {
   const W = termWidth();
   const fill = " ".repeat(W);
-  // prefix: 3 空格 + ❯(宽字符=2列) + 1 空格 = 视觉宽度 6
+  // prefix: 3空格 + ❯(双列宽) + 1空格 = 视觉宽度 6
   const prefix = "   " + chalk.green("❯") + " ";
   const prefixVW = 6;
   const textVW = visualWidth(text);
   const padding = Math.max(0, W - prefixVW - textVW);
 
-  // 上一行：全宽绿色背景空白
   process.stdout.write("\n" + USER_MSG_BG(fill) + "\n");
-  // 中间行：用户消息 + 绿色背景全宽填充
   process.stdout.write(USER_MSG_BG(prefix + text + " ".repeat(padding)) + "\n");
-  // 下一行：全宽绿色背景空白
   process.stdout.write(USER_MSG_BG(fill) + "\n\n");
 }
 
