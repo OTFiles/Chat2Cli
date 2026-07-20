@@ -109,6 +109,11 @@ export async function runAgent(opts = {}) {
     return listAgents();
   }
 
+  // ── 批量删除模式 ──
+  if (opts.batch) {
+    return batchDeleteAgents();
+  }
+
   // ── 删除模式 ──
   if (opts.delete) {
     return deleteAgent(opts.delete);
@@ -273,6 +278,130 @@ async function listAgents() {
       formatDate(c.updatedAt)
     ])
   );
+}
+
+// ── 批量删除 ──
+
+async function batchDeleteAgents() {
+  const composites = listComposites();
+  if (composites.length === 0) {
+    printInfo("暂无复合对话。");
+    return;
+  }
+
+  const entries = composites.map((c) => ({
+    id: c.id,
+    label: `${c.name || "未命名"}  ${c.main.provider || "-"}/${c.aux.provider || "-"}  (${c.messages?.length || 0} 条)`
+  }));
+
+  // 行内实现 multiSelectPicker（避免跨文件依赖）
+  const selected = await multiSelect(entries, "选择要删除的复合对话");
+  if (!selected) { printInfo("已取消"); return; }
+  if (selected.length === 0) { printInfo("未选择任何对话"); return; }
+
+  const ans = await inquirer.prompt([{
+    type: "confirm",
+    name: "ok",
+    message: `确认删除 ${chalk.bold(selected.length)} 个复合对话?`,
+    default: false
+  }]);
+
+  if (!ans.ok) { printInfo("已取消"); return; }
+
+  for (const id of selected) deleteComposite(id);
+  printSuccess(`已删除 ${selected.length} 个复合对话`);
+}
+
+/** 多选列表选择器（空格切换，上下导航，Enter 确认） */
+function multiSelect(entries, title) {
+  if (!entries.length) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    const PAGE = 20;
+    let selected = new Set();
+    let cursor = 0;
+    let scroll = 0;
+    let escState = 0;
+
+    function clearScreen() {
+      const lines = Math.min(PAGE, entries.length - scroll) + 2;
+      process.stdout.write(`\x1b[${lines}A\x1b[J`);
+    }
+
+    function fitOneLine(text, maxW) {
+      let w = 0;
+      for (let i = 0; i < text.length; i++) {
+        w += text.charCodeAt(i) > 127 ? 2 : 1;
+        if (w > maxW) return text.slice(0, i) + "...";
+      }
+      return text;
+    }
+
+    function cjkWidth(t) {
+      return [...t].reduce((s, c) => s + (c.charCodeAt(0) > 127 ? 2 : 1), 0);
+    }
+
+    function render() {
+      const maxCols = (process.stdout.columns || 80) - 1;
+      const end = Math.min(scroll + PAGE, entries.length);
+      process.stdout.write(chalk.gray(`${title}  [空格]选择  [Enter]确认  [Ctrl+C]取消  (已选 ${selected.size})\n`));
+      process.stdout.write(`  ${chalk.gray("─".repeat(56))}\n`);
+      for (let i = scroll; i < end; i++) {
+        const e = entries[i];
+        const sel = selected.has(e.id);
+        const mark = sel ? chalk.green("✓") : " ";
+        const label = fitOneLine(e.label, maxCols - 12);
+        const blank = " ".repeat(Math.max(1, maxCols - 12 - cjkWidth(label)));
+        process.stdout.write(i === cursor
+          ? chalk.bgCyan.black(` ❯ [${mark}] ${label}${blank}`) + "\n"
+          : `   [${mark}] ${label}${blank}\n`);
+      }
+    }
+
+    function scrollTo() {
+      if (cursor < scroll) scroll = cursor;
+      else if (cursor >= scroll + PAGE) scroll = cursor - PAGE + 1;
+    }
+
+    function toggle() {
+      if (selected.has(entries[cursor].id)) selected.delete(entries[cursor].id);
+      else selected.add(entries[cursor].id);
+    }
+
+    function onData(chunk) {
+      const str = chunk.toString("utf-8");
+      for (const char of str) {
+        const code = char.codePointAt(0);
+        if (escState > 0) {
+          if (char === "[" && escState === 1) { escState = 2; continue; }
+          if (escState === 2) {
+            if (char === "A") { if (cursor > 0) cursor--; }
+            else if (char === "B") { if (cursor < entries.length - 1) cursor++; }
+            escState = 0; scrollTo(); clearScreen(); render(); continue;
+          }
+          escState = 0; continue;
+        }
+        if (code === 27) { escState = 1; continue; }
+        if (code === 32) { toggle(); clearScreen(); render(); continue; }
+        if (code === 13) {
+          cleanup();
+          resolve(selected.size ? [...selected] : []);
+          return;
+        }
+        if (code === 3) { cleanup(); resolve(null); return; }
+      }
+    }
+
+    function cleanup() {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdin.removeListener("data", onData);
+    }
+
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on("data", onData);
+    render();
+  });
 }
 
 // ── 删除 ──

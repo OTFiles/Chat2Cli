@@ -225,6 +225,7 @@ program
   .option("--list", "列出所有复合对话")
   .option("--continue <id>", "继续指定复合对话")
   .option("--delete <id>", "删除指定复合对话")
+  .option("--batch", "多选批量删除复合对话")
   .option("--dir <path>", "指定工作目录")
   .addHelpText("after", `
 ${chalk.dim("说明:")}
@@ -237,6 +238,7 @@ ${chalk.dim("用法:")}
   ${chalk.cyan("chat2cli agent --list")}    列出所有复合对话
   ${chalk.cyan("chat2cli agent --continue <id>")}  继续指定对话
   ${chalk.cyan("chat2cli agent --delete <id>")}    删除指定对话
+  ${chalk.cyan("chat2cli agent --batch")}          多选批量删除
 
 ${chalk.dim("TUI 内置命令:")}
   ${chalk.cyan("/help")}       显示帮助
@@ -257,6 +259,7 @@ ${chalk.dim("快捷键:")}
         list: opts.list,
         continue: opts.continue,
         delete: opts.delete,
+        batch: opts.batch,
         dir: opts.dir
       });
     } catch (err) {
