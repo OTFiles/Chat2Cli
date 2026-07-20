@@ -916,7 +916,8 @@ function renderToolResultLines(toolName, result, useBg) {
     case "shell": {
       const output = result.stderr || result.stdout || "(无输出)";
       const lines = output.split("\n");
-      for (const line of lines) {
+      for (let line of lines) {
+        line = line.replace(/\t/g, "        ");
         out("   " + (result.stderr ? chalk.red(line) : chalk.white(line)));
       }
       if (result.error && !result.stderr) {
@@ -976,7 +977,7 @@ function renderToolResultLines(toolName, result, useBg) {
     default:
       out("   " + chalk.gray(JSON.stringify(result).slice(0, 120)));
   }
-  process.stdout.write("\n");
+  if (!useBg) process.stdout.write("\n");
 }
 
 // ── 旧渲染函数（echoMessages 复用）──
