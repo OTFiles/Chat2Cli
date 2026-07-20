@@ -32,15 +32,18 @@ node bin/chat2cli.js serve -p 3000      # 启动 OpenAI 兼容 API 服务
 ```
 bin/chat2cli.js          CLI 入口（commander 路由 + 全局错误处理）
     ↓
-src/commands/*.js        命令实现（login / chat / history / config / apikey / serve）
+src/commands/*.js        命令实现（login / chat / history / config / apikey / agent / serve）
+    ↓
+src/extensions/          扩展系统（钩子、自定义工具/命令/路由、提示词注入）
     ↓
 src/providers/registry.js Provider 注册中心（Map<name, instance>）
     ↓
 src/providers/deepseek/  DeepSeek Provider
 src/providers/openai/    OpenAI Provider
 src/providers/qwen/      Qwen Provider（单文件）
+src/providers/glm/       GLM Provider（单文件，手机号+验证码）
     ↓
-src/bridge.js            OpenAI ↔ DeepSeek/Qwen 协议桥接（prompt 构建、SSE 流转换、模型配置）
+src/bridge.js            OpenAI ↔ DeepSeek/Qwen/GLM 协议桥接（prompt 构建、SSE 流转换、模型配置）
     ↓
 src/storage/store.js     JSON 文件存储（~/.chat2cli/data.json）
 ```
@@ -101,6 +104,42 @@ chat  → create session → build payload → POST /api/v2/chat/completions →
   - 支持顶层 content/answer/text/delta 和 reasoning_content/reasoning/thinking
   - 递归解析 `data` 和 `message` 子对象
   - 返回 `Array<{ kind: "thinking" | "response", text }>`
+
+## GLM Provider 数据流
+
+GLM 通过手机号 + 验证码登录，后续请求携带 accessToken。
+
+```
+login → 手机号 → POST /api/v1/sms/send → 验证码 → POST /api/v1/oauth/token → accessToken
+chat  → build payload → POST /api/chatgpt/chat/completions → SSE stream
+```
+
+关键实现（`src/providers/glm/index.js`）：
+- `sendSms(phone)` — 发送短信验证码
+- `loginWithSms(phone, code)` — 验证码登录获取 accessToken
+- `chat(messages, options)` — 直接调用 chat completions API，无需创建 session
+
+## 扩展系统
+
+`src/extensions/` 提供可插拔的扩展机制：
+
+- **加载器** (`loader.js`) — 从 `~/.chat2cli/extensions/` 目录自动发现并加载扩展
+- **钩子系统** (`hooks.js`) — `pre:response_start` 等生命周期钩子，扩展可注册回调
+- **注册中心** (`registry.js`) — 统一管理 Provider、工具、TUI 命令、路由、提示词片段
+- 示例见 `examples/extensions/hello-world.js` 和 `chat-timestamp.js`
+
+## Agent UI 渲染
+
+`src/utils/format.js`:
+- `printUserMsg` — 用户消息输出 3 行全宽背景块（`USER_MSG_BG = bgRgb(40,40,40)`）；chat 和 agent 共用
+- `visualWidth` — 视觉宽度计算（CJK=2, ASCII=1），用于背景填充
+
+`src/agent/tui.js`:
+- `TOOL_BG = bgRgb(0,45,5)` — 工具执行深绿色背景
+- `tool_start` — 输出 3 行绿色背景块（空白+标签+空白）
+- `tool_result` — `\x1b[3A` 上跳覆盖 `tool_start` 块，`renderToolResultLines(..., true)` 包裹每行全宽背景
+- Shell 结果 `\t` → 8 空格，避免 `visualWidth` 低估导致背景错位
+- 无 "Agent工作中..." 浮层状态条
 
 ## Server 模式（OpenAI 兼容 API）
 

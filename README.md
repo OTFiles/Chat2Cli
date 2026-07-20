@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **多 AI 服务商支持** - DeepSeek、OpenAI、Qwen(通义千问)
+- **多 AI 服务商支持** - DeepSeek、OpenAI、Qwen(通义千问)、GLM(智谱清言)
 - **多账号登录** - DeepSeek / Qwen 支持多个账号并存，聊天时可选
 - **流式输出** - 实时显示 AI 回复，支持思考过程展示
 - **对话历史** - 自动保存本地对话，支持查看、搜索、继续、删除
@@ -17,6 +17,8 @@
 - **模型切换** - 对话中随时切换模型
 - **Markdown 渲染** - 支持标题/代码块/表格/列表等，可通过 `--no-markdown` 关闭
 - **批量管理** - 多选删除本地对话和云端会话
+- **扩展系统** - 支持 Provider/工具/命令/钩子/路由/提示词注入，见 `examples/extensions/`
+- **终端 UI** - 用户消息透明白色背景块，工具执行绿色背景块
 - **本地存储** - 数据保存在 `~/.chat2cli/` 目录，纯 JSON 格式
 
 ## 快速开始
@@ -52,6 +54,8 @@ chat2cli login
 - **Qwen (通义千问)**:
   - 邮箱 + 密码登录（推荐）— 自动调用 Qwen 登录 API 获取 token
   - 或手动输入 Bearer Token
+- **GLM (智谱清言)**:
+  - 粘贴 `chatglm_refresh_token` (其本身使用验证码登录)
 
 ### `chat2cli chat` — 开始对话
 
@@ -202,17 +206,19 @@ chat2cli agent --continue <id>
 chat2cli agent --delete <id>
 ```
 
-Agent 模式使用**主 AI + 辅助 AI** 双账号协作，能自动使用工具完成编程任务。首次运行时会交互式选择两个 AI 的账号，之后自动记住选择（存储在 `~/.chat2cli/data.json` 的 `agent` 配置中）。
+Agent 模式使用**主 AI + 辅助 AI** 双账号协作，能自动使用工具完成编程任务。首次运行时会交互式选择两个 AI 的账号，之后自动记住选择（存储在 `~/.chat2cli/data.json` 的 `agent` 配置中）。每次对话达到 token 上限后自动总结并创建新子对话，无迭代次数限制。
 
 **支持的工具有**:
 
 | 工具 | 功能 | 说明 |
 |------|------|------|
-| `shell` | Shell 命令执行 | 危险操作（rm -rf、git push --force 等）需用户确认 |
+| `shell` | Shell 命令执行 | 危险操作（rm -rf、git push --force 等）需用户确认；`--timeout` 可配超时 |
 | `file-read` | 文件读取 | 支持指定行范围 |
 | `file-write` | 文件写入 | mode=create 创建新文件 / mode=replace 替换内容 |
 | `file-search` | 文件搜索 | type=content 搜索文件内容 / type=filename 搜索文件名 |
 | `todo` | 任务清单管理 | 每次对话自动发送，确保 AI 记住任务进度 |
+
+工具执行时以深绿色背景块展示调用标签和返回结果，Shell 输出自动将 tab 转为空格确保排版一致。
 
 **TUI 内置命令**:
 
@@ -223,6 +229,10 @@ Agent 模式使用**主 AI + 辅助 AI** 双账号协作，能自动使用工具
 | `/todo` | 查看当前任务清单 |
 | `/context` | 查看当前复合对话上下文（主/辅 AI、消息数） |
 | `/aux <任务>` | 将简单子任务委托给辅助 AI 执行 |
+| `/models` | 列出可用模型 |
+| `/model <名>` | 切换模型 |
+| `/switch` | 列出历史复合对话 |
+| `/conv <序号>` | 切换到指定复合对话 |
 | `/help` | 显示帮助 |
 
 **快捷键**:
@@ -261,6 +271,14 @@ Agent 模式使用**主 AI + 辅助 AI** 双账号协作，能自动使用工具
 | gpt-3.5-turbo | GPT-3.5 Turbo |
 | o1 | o1 |
 | o3-mini | o3-mini |
+
+### GLM (智谱清言)
+
+| 模型 ID | 说明 |
+|---------|------|
+| glm-4-flash | GLM-4 Flash |
+| glm-4-plus | GLM-4 Plus |
+| glm-4-air | GLM-4 Air |
 
 ### Qwen (通义千问)
 
@@ -319,6 +337,11 @@ cli/
 │   │   │   └── registry.js       # 工具注册 + 执行
 │   │   └── storage/
 │   │       └── composite.js      # 复合对话存储
+│   ├── extensions/
+│   │   ├── index.js              # 扩展系统入口
+│   │   ├── loader.js             # 扩展加载器
+│   │   ├── hooks.js              # 钩子系统
+│   │   └── registry.js           # 扩展注册中心
 │   ├── providers/
 │   │   ├── base.js               # Provider 抽象基类
 │   │   ├── registry.js           # Provider 注册中心
@@ -329,7 +352,8 @@ cli/
 │   │   │   ├── chat.js           # 对话请求
 │   │   │   └── pow-solver.js     # PoW 挑战求解
 │   │   ├── openai/index.js       # OpenAIProvider
-│   │   └── qwen/index.js         # QwenProvider
+│   │   ├── qwen/index.js         # QwenProvider
+│   │   └── glm/index.js          # GLMProvider
 │   ├── storage/store.js          # JSON 文件存储
 │   └── utils/
 │       ├── id.js                 # ID 生成
@@ -363,9 +387,7 @@ export class MyProvider extends BaseProvider {
 ## 运行要求
 
 - Node.js 18+
-- DeepSeek 需要能够访问 chat.deepseek.com
-- OpenAI 需要能够访问 api.openai.com
-- Qwen 需要能够访问 chat.qwen.ai
+- 设备能够正常访问网络
 
 ## 致谢
 
@@ -386,6 +408,7 @@ export class MyProvider extends BaseProvider {
 
 **[pi](https://github.com/earendil-works/pi)**
 - agent及chat模式下的粘贴缩略逻辑
+- 部分UI设计
 
 特此感谢 TQZHR 、 YuJunZhiXue 以及 earendil-works 的开源贡献。
 
