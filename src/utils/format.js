@@ -1,7 +1,7 @@
 import chalk from "chalk";
 
-// ── 用户消息背景色：深色底 + 绿色 ──
-export const USER_MSG_BG = chalk.bgRgb(0, 55, 10);
+// ── 用户消息背景色：透明白色 ──
+export const USER_MSG_BG = chalk.bgRgb(40, 40, 40);
 
 // ── Box drawing ──
 

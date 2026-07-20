@@ -781,7 +781,7 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
         thinkingFirstChunk = true;
       }
       thinkingBuf += event.text;
-      // 参照 chat.js：简单逐字追加灰度文本
+      // 简单逐字追加灰度文本
       let t = event.text;
       if (thinkingFirstChunk) {
         t = "   " + t;       // 首段缩进
@@ -836,7 +836,7 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
       const pad = Math.max(0, W - 3 - visualWidth(doneClean));
       process.stdout.write(TOOL_BG(fill) + "\n");
       process.stdout.write(TOOL_BG("   " + doneLabel + " ".repeat(pad)) + "\n");
-      renderToolResultLines(event.toolName, event.toolResult);
+      renderToolResultLines(event.toolName, event.toolResult, true);
       process.stdout.write(TOOL_BG(fill) + "\n\n");
       break;
     }
@@ -900,56 +900,64 @@ function toolDoneLabel(toolName, result) {
   }
 }
 
-/** 渲染工具结果内容（不含标签，标签已在 tool_result case 中输出） */
-function renderToolResultLines(toolName, result) {
+/** 渲染工具结果内容（不含标签，标签已在 tool_result case 中输出）。useBg=true 时每行包裹 TOOL_BG 全宽背景 */
+function renderToolResultLines(toolName, result, useBg) {
   if (!result) return;
+  const W = termWidth();
+  const wrapBg = (s) => {
+    if (!useBg) return s;
+    const clean = s.replace(/\x1b\[[0-9;]*m/g, "");
+    const padW = Math.max(0, W - visualWidth(clean));
+    return TOOL_BG(s + " ".repeat(padW));
+  };
+  const out = (s) => process.stdout.write(wrapBg(s) + "\n");
 
   switch (toolName) {
     case "shell": {
       const output = result.stderr || result.stdout || "(无输出)";
       const lines = output.split("\n");
       for (const line of lines) {
-        process.stdout.write("   " + (result.stderr ? chalk.red(line) : chalk.white(line)) + "\n");
+        out("   " + (result.stderr ? chalk.red(line) : chalk.white(line)));
       }
       if (result.error && !result.stderr) {
-        process.stdout.write("   " + chalk.red(result.error.slice(0, 200)) + "\n");
+        out("   " + chalk.red(result.error.slice(0, 200)));
       }
       break;
     }
     case "file-read": {
       if (!result.success) {
-        process.stdout.write("   " + chalk.red(result.error || "读取失败") + "\n");
+        out("   " + chalk.red(result.error || "读取失败"));
       } else {
-        process.stdout.write("   " + chalk.dim(`(行 ${result.offset || 0}-${(result.offset || 0) + (result.lines || 0)} / 共 ${result.totalLines || "?"} 行)`) + "\n");
+        out("   " + chalk.dim(`(行 ${result.offset || 0}-${(result.offset || 0) + (result.lines || 0)} / 共 ${result.totalLines || "?"} 行)`));
       }
       break;
     }
     case "file-write": {
       if (!result.success) {
-        process.stdout.write("   " + chalk.red(result.error || "写入失败") + "\n");
+        out("   " + chalk.red(result.error || "写入失败"));
       }
       break;
     }
     case "file-search": {
       if (result.error) {
-        process.stdout.write("   " + chalk.red(result.error) + "\n");
+        out("   " + chalk.red(result.error));
         return;
       }
-      process.stdout.write("   " + chalk.dim(`(${result.count || 0} 个结果${result.truncated ? "，已截断" : ""})`) + "\n");
+      out("   " + chalk.dim(`(${result.count || 0} 个结果${result.truncated ? "，已截断" : ""})`));
       if (result.type === "filename" && result.files) {
         for (const f of result.files.slice(0, 10)) {
-          process.stdout.write(chalk.gray("   │ ") + f + "\n");
+          out(chalk.gray("   │ ") + f);
         }
         if (result.files.length > 10) {
-          process.stdout.write(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.files.length - 10} 个`) + "\n");
+          out(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.files.length - 10} 个`));
         }
       }
       if (result.type === "content" && result.matches) {
         for (const m of result.matches.slice(0, 10)) {
-          process.stdout.write(chalk.gray(`   │ ${m.file}:${m.line}`) + "  " + m.text.slice(0, 120) + "\n");
+          out(chalk.gray(`   │ ${m.file}:${m.line}`) + "  " + m.text.slice(0, 120));
         }
         if (result.matches.length > 10) {
-          process.stdout.write(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.matches.length - 10} 个`) + "\n");
+          out(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.matches.length - 10} 个`));
         }
       }
       break;
@@ -960,13 +968,13 @@ function renderToolResultLines(toolName, result) {
         for (const t of tasks) {
           const icon = t.status === "completed" ? chalk.green("✓") :
                        t.status === "in_progress" ? chalk.yellow("▶") : chalk.gray("○");
-          process.stdout.write(`     ${icon} ${t.content}\n`);
+          out(`     ${icon} ${t.content}`);
         }
       }
       break;
     }
     default:
-      process.stdout.write("   " + chalk.gray(JSON.stringify(result).slice(0, 120)) + "\n");
+      out("   " + chalk.gray(JSON.stringify(result).slice(0, 120)));
   }
   process.stdout.write("\n");
 }
