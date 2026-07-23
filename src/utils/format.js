@@ -189,7 +189,7 @@ export function printUserMsg(text) {
   const W = termWidth();
   const fill = " ".repeat(W);
   // prefix: 3空格 + ❯(双列宽) + 1空格 = 视觉宽度 6
-  const prefix = "   " + chalk.green("❯") + " ";
+  const prefix = "   " + chalk.green(" ") + " "; // 修改，去除❯作为提醒
   const prefixVW = 6;
   const textVW = visualWidth(text);
   const padding = Math.max(0, W - prefixVW - textVW);
