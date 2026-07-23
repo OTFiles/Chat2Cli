@@ -230,8 +230,7 @@ program
   .addHelpText("after", `
 ${chalk.dim("说明:")}
   Agent 模式使用主 AI + 辅助 AI 双账号协作，能自动使用工具完成编程任务。
-  支持的工具有: shell 命令执行、文件读写、文件搜索、任务清单管理。
-  支持 delegate 工具将子任务委派给子 Agent 并发执行。
+  支持 delegate 工具委派子 Agent、ask 工具询问用户、工具审批机制。
 
 ${chalk.dim("用法:")}
   ${chalk.cyan("chat2cli agent")}           新建或继续复合对话

@@ -281,19 +281,19 @@ export async function* runAgentLoop(userInput, context) {
       // 子 agent 内部进度回调 — 在 executeDelegate 的 await 期间
       // 直接输出到 stdout 提供实时反馈
       if (eventType === "spawned") {
-        process.stdout.write(`  ${chalk.dim("⏳")} 子Agent已启动: ${(data.task || "").slice(0, 60)}...\n`);
+        process.stdout.write(`  ${chalk.dim("[Sub]")} 子Agent已启动: ${(data.task || "").slice(0, 60)}...\n`);
       } else if (eventType === "running") {
-        process.stdout.write(`  ${chalk.dim("🔄")} 子Agent工作中...\n`);
+        process.stdout.write(`  ${chalk.dim("[..]")} 子Agent工作中...\n`);
       } else if (eventType === "tool_start") {
-        process.stdout.write(`  ${chalk.dim("🔧")} 子Agent调用: ${data.toolName}\n`);
+        process.stdout.write(`  ${chalk.dim("[>>]")} 子Agent调用: ${data.toolName}\n`);
       } else if (eventType === "completed") {
-        process.stdout.write(`  ${chalk.dim("✅")} 子Agent完成 (${data.turns} 轮, ${data.toolCount || 0} 次工具调用)\n`);
+        process.stdout.write(`  ${chalk.dim("[OK]")} 子Agent完成 (${data.turns} 轮, ${data.toolCount || 0} 次工具调用)\n`);
       } else if (eventType === "failed") {
-        process.stdout.write(`  ${chalk.red("✗")} 子Agent失败: ${(data.error || "").slice(0, 100)}\n`);
+        process.stdout.write(`  ${chalk.red("[FAIL]")} 子Agent失败: ${(data.error || "").slice(0, 100)}\n`);
       } else if (eventType === "cancelled") {
-        process.stdout.write(`  ${chalk.yellow("⚠")} 子Agent已取消\n`);
+        process.stdout.write(`  ${chalk.yellow("[!]")} 子Agent已取消\n`);
       } else if (eventType === "timed_out") {
-        process.stdout.write(`  ${chalk.yellow("⏰")} 子Agent超时 (${data.timeoutMs}ms)\n`);
+        process.stdout.write(`  ${chalk.yellow("[TIMEOUT]")} 子Agent超时 (${data.timeoutMs}ms)\n`);
       }
     }
   }) : null;
@@ -496,17 +496,79 @@ export async function* runAgentLoop(userInput, context) {
           if (toolName === "delegate") {
             const taskDesc = params.task || (params.tasks ? `${params.tasks.length} 个并发子任务` : "未知任务");
             yield { type: "subagent_spawn", task: taskDesc, params };
+          } else if (toolName === "ask") {
+            // ask 工具不走正常 tool_start，直接在这里处理
           } else {
             yield { type: "tool_start", toolName, toolParams: params };
           }
 
-          const toolResult = await executeToolCall(toolName, params, {
+          // ── 执行工具 ──
+          let toolResult = await executeToolCall(toolName, params, {
             workingDir,
             taskList: composite.taskList || [],
             shellTimeout,
             subagentManager,
             onSubagentEvent
           });
+
+          // ── 审批 / ask 处理（Promise 桥接）──
+          if (toolResult.requiresApproval) {
+            const approvalType = toolResult.approvalType || "shell";
+            let resolution;
+            const approvalPromise = new Promise((r) => { resolution = r; });
+
+            if (approvalType === "ask") {
+              yield {
+                type: "ask_user",
+                question: toolResult.result.question,
+                options: toolResult.result.options,
+                toolName,
+                params,
+                resolve: resolution
+              };
+            } else {
+              yield {
+                type: "approval_required",
+                toolName,
+                approvalType,
+                params,
+                warning: toolResult.result.warning || "此操作需要审批",
+                command: toolResult.result.command || params.command || "",
+                resolve: resolution
+              };
+            }
+
+            const decision = await approvalPromise;
+            if (!decision || !decision.approved) {
+              const denyMsg = approvalType === "ask"
+                ? "用户未回答"
+                : `工具 ${toolName} 被用户拒绝${decision?.reason ? `: ${decision.reason}` : ""}`;
+              const denyText = `[拒绝] ${denyMsg}`;
+              appendMessage(composite, {
+                role: "tool", content: denyText, source: "tool",
+                toolName, toolResult: { error: denyMsg }
+              });
+              if (toolName !== "delegate") {
+                yield { type: "info", text: denyText };
+              }
+              continue;
+            }
+
+            // 批准：ask 类直接使用用户回答作为结果
+            if (approvalType === "ask") {
+              toolResult = { result: { answer: decision.answer || "", type: "ask" } };
+            } else {
+              // shell 等：用修改后的参数重新执行
+              const redoParams = decision.modifiedParams || { ...params, requires_approval: true };
+              toolResult = await executeToolCall(toolName, redoParams, {
+                workingDir,
+                taskList: composite.taskList || [],
+                shellTimeout,
+                subagentManager,
+                onSubagentEvent
+              });
+            }
+          }
 
           // ── 委托工具特殊处理：yield subagent_result 事件 ──
           if (toolName === "delegate") {
@@ -522,11 +584,6 @@ export async function* runAgentLoop(userInput, context) {
             if (postResult.modified && postResult.payload?.result) {
               toolResult.result = postResult.payload.result;
             }
-          }
-
-          if (toolResult.requiresApproval) {
-            yield { type: "tool_start", toolName, requiresApproval: true, toolResult: toolResult.result };
-            continue;
           }
 
           const resultText = formatToolResultCompact(toolName, toolResult.result);

@@ -79,23 +79,38 @@ ${toolSection}
 
 ## 辅助 AI 与子 Agent
 
-你可以通过以下两种方式利用辅助 AI：
+你可以通过以下方式利用辅助 AI：
 
 1. **@aux 标记**：将简单、独立、不需要上下文的子任务委托给辅助 AI
 \`\`\`
 @aux 请帮我检查文件 X 是否存在语法错误
 \`\`\`
-辅助 AI 的结果会追加到对话中。
 
-2. **delegate 工具**：生成子 Agent 来执行探索/搜索/检查类任务。子 Agent 是独立的 AI，拥有 shell、file-read、file-search 工具。适合需要工具验证的独立子任务。
+2. **delegate 工具**：生成子 Agent 来执行探索/搜索/检查类任务。子 Agent 是独立的 AI，受 profile 配置约束（工具列表、shell 白名单）。
 \`\`\`
-<invoke name="delegate" task="搜索项目中所有 TODO 注释并分类" />
+<invoke name="delegate" task="搜索所有 TODO 注释" profile="explorer" />
 \`\`\`
+内置 profile:
+  - default: 只读工具，基础 shell 白名单，5 轮
+  - explorer: 搜索增强，更多搜索命令，10 轮
+  - builder: 包含 file-write，构建类命令，15 轮
 可并发委托多个子任务：
 \`\`\`
-<invoke name="delegate" tasks='[{"task":"检查 auth.js 的安全性"},{"task":"查找所有未使用的导入"}]' />
+<invoke name="delegate" tasks='[{"task":"检查 auth.js","profile":"explorer"},{"task":"构建前端"}]' />
 \`\`\`
-复杂任务、需要文件写入的操作请自己完成。
+
+## 询问用户
+
+当需要用户做出选择时（端口号、确认操作、方案选择），使用 ask 工具：
+\`\`\`
+<invoke name="ask" question="使用哪个端口启动？" options='["3000","8080","自定义"]' />
+\`\`\`
+用户回答后将作为工具结果返回，你可以基于回答继续执行。
+
+## 工具审批
+
+某些工具操作可能触发审批（危险 shell 命令等）。如果工具返回"需要审批"，系统会暂停并询问用户。
+你不需要特别处理审批流程，系统会自动处理。用户批准后操作会继续，拒绝后会收到通知。
 
 ## 注意事项
 

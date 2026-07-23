@@ -63,12 +63,21 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "delegate",
-    description: "将子任务委托给子 Agent 执行。子 Agent 是独立的 AI，拥有 shell、file-read、file-search 工具。适合独立、不需上下文的探索/搜索/检查类任务。可并发委托多个子任务。",
+    description: "将子任务委托给子 Agent 执行。子 Agent 是独立的 AI，受 profile 配置约束（工具列表、shell 白名单等）。适合独立、不需上下文的探索/搜索/检查类任务。可并发委托多个子任务。",
     parameters: {
       task: { type: "string", required: true, description: "子任务描述（要具体、可验证）" },
-      tasks: { type: "array", required: false, description: "并发委托多个子任务时的任务数组 [{ task: '描述', tools: ['shell','file-read'] }]" },
-      tools: { type: "array", required: false, description: "允许子 Agent 使用的工具名称列表，默认 ['shell','file-read','file-search']" },
-      max_turns: { type: "number", required: false, description: "子 Agent 最大工具调用轮次，默认 5" }
+      tasks: { type: "array", required: false, description: "并发委托多个子任务时的任务数组 [{ task: '描述', profile: 'explorer' }]" },
+      profile: { type: "string", required: false, description: "子 Agent 配置名称。内置: default（默认，只读）、explorer（搜索增强）、builder（可写）。可自定义。" },
+      tools: { type: "array", required: false, description: "覆盖 profile 中的工具列表" },
+      max_turns: { type: "number", required: false, description: "覆盖 profile 中的最大工具调用轮次" }
+    }
+  },
+  {
+    name: "ask",
+    description: "向用户提问并等待回复。用于需要用户决策的场景（端口号、确认操作、选择方案等）。",
+    parameters: {
+      question: { type: "string", required: true, description: "要询问用户的问题" },
+      options: { type: "array", required: false, description: "可选的候选项列表，如 ['选项A','选项B','自定义输入']。不提供则自由输入。" }
     }
   }
 ];
@@ -146,6 +155,8 @@ export async function executeToolCall(toolName, params, context = {}) {
       return executeTodo(params, context);
     case "delegate":
       return executeDelegate(params, context);
+    case "ask":
+      return executeAsk(params, context);
     default:
       return { result: { error: `未知工具: ${toolName}` } };
   }
@@ -171,7 +182,8 @@ function executeShell(params, context) {
   if (isDangerous(command) && !requires_approval) {
     return {
       requiresApproval: true,
-      result: { warning: `命令可能危险: ${command}`, needsConfirm: true }
+      approvalType: "shell",
+      result: { warning: `命令可能危险: ${command}`, needsConfirm: true, command }
     };
   }
 
@@ -436,27 +448,27 @@ async function executeDelegate(params, context) {
     return { result: { error: "子 Agent 管理器未初始化，无法委托任务" } };
   }
 
-  const { task, tasks, tools, max_turns } = params;
+  const { task, tasks, profile, tools, max_turns } = params;
+  const profileName = profile || "default";
 
   // 并发委托模式
   if (tasks && Array.isArray(tasks) && tasks.length > 0) {
     const taskItems = tasks.map((t) => ({
       task: typeof t === "string" ? t : t.task,
+      profile: t.profile || profileName,
       tools: t.tools || tools || undefined,
       maxTurns: t.max_turns || max_turns || undefined
     }));
 
-    // 通过 context.onSubagentEvent 转发事件
     if (context.onSubagentEvent) {
       context.onSubagentEvent(null, "parallel_start", { count: taskItems.length, tasks: taskItems.map(t => t.task) });
     }
 
     const results = await manager.spawnParallel(taskItems, 3);
 
-    // 汇总结果
     const summary = results.map((r, i) => {
-      const status = r.status === "completed" ? "✓" : r.status === "failed" ? "✗" : "○";
-      return `[${status}] 子任务 ${i + 1}: ${r.task.slice(0, 80)}\
+      const status = r.status === "completed" ? "[OK]" : r.status === "failed" ? "[FAIL]" : "[..]";
+      return `${status} 子任务 ${i + 1}: ${r.task.slice(0, 80)}\
 结果: ${(r.result || r.error || "无").slice(0, 500)}`;
     }).join("\
 \
@@ -486,10 +498,11 @@ async function executeDelegate(params, context) {
   }
 
   if (context.onSubagentEvent) {
-    context.onSubagentEvent(null, "spawn_single", { task });
+    context.onSubagentEvent(null, "spawn_single", { task, profile: profileName });
   }
 
   const result = await manager.spawnAndWait(task, {
+    profile: profileName,
     tools: tools || undefined,
     maxTurns: max_turns || undefined
   });
@@ -498,10 +511,32 @@ async function executeDelegate(params, context) {
     result: {
       success: result.status === "completed",
       type: "delegate",
+      profile: profileName,
       task: task.slice(0, 200),
       status: result.status,
       result: result.result || result.error || "",
       error: result.error || null
+    }
+  };
+}
+
+/**
+ * executeAsk — 向用户提问并等待回复
+ * 返回 requiresApproval 让 Agent 循环暂停并等待 TUI 收集用户输入
+ */
+function executeAsk(params, context) {
+  const { question, options } = params;
+  if (!question) {
+    return { result: { error: "需要 question 参数" } };
+  }
+
+  return {
+    requiresApproval: true,
+    approvalType: "ask",
+    result: {
+      type: "ask",
+      question,
+      options: options || null
     }
   };
 }

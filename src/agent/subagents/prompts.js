@@ -20,12 +20,15 @@ function detectOS() {
  * 构建子 agent 系统提示词
  * @param {object} opts
  * @param {string} opts.workingDir - 工作目录
- * @param {string[]} [opts.allowedTools] - 允许使用的工具名列表（默认 ["shell", "file-read", "file-search"]）
- * @param {object} [opts.toolDefinitions] - 工具定义数组（用于注入提示词）
+ * @param {string[]} [opts.allowedTools] - 允许使用的工具名列表
+ * @param {object} [opts.toolDefinitions] - 工具定义数组
+ * @param {string[]} [opts.allowedShellCommands] - 允许的 shell 命令白名单
+ * @param {boolean} [opts.blockUnlistedCommands] - 是否阻止白名单外的命令
  */
-export function buildSubAgentSystemPrompt({ workingDir, allowedTools, toolDefinitions }) {
+export function buildSubAgentSystemPrompt({ workingDir, allowedTools, toolDefinitions, allowedShellCommands, blockUnlistedCommands }) {
   const tools = allowedTools || ["shell", "file-read", "file-search"];
   const toolSection = buildSubToolSection(toolDefinitions, tools);
+  const whitelistSection = buildWhitelistSection(allowedShellCommands, blockUnlistedCommands);
 
   return `你是一个 AI 编程助手的子代理（Sub-agent），负责执行主 AI 分配的单个子任务。
 
@@ -43,6 +46,8 @@ export function buildSubAgentSystemPrompt({ workingDir, allowedTools, toolDefini
 6. **完成后结束**：执行完任务后直接给出结果，不要问"还需要做什么"
 
 ${toolSection}
+
+${whitelistSection}
 
 ## 工具调用格式
 
@@ -93,4 +98,15 @@ function buildSubToolSection(toolDefinitions, allowedTools) {
   return `## 可用工具
 
 ${tools || "无（纯文本任务）"}`;
+}
+
+function buildWhitelistSection(allowedShellCommands, blockUnlistedCommands) {
+  if (!allowedShellCommands || allowedShellCommands.length === 0) return "";
+  const block = blockUnlistedCommands !== false;
+  const cmds = allowedShellCommands.join(", ");
+
+  if (block) {
+    return `## Shell 命令白名单\n\n你只能使用以下 shell 命令：${cmds}\n\n白名单外的命令会被自动拒绝。如需执行其他命令，请在结果中向主 AI 说明需求。`;
+  }
+  return `## Shell 命令提示\n\n推荐使用的 shell 命令：${cmds}\n\n其他命令也可使用，但非白名单命令可能需要主 AI 审批。`;
 }

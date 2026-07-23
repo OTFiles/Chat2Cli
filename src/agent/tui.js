@@ -620,6 +620,13 @@ export async function agentTui(context) {
         hooks,
         signal: abortController.signal
       })) {
+        // ── 审批/ask 交互式事件：阻塞等待用户输入 ──
+        if (event.type === "approval_required" || event.type === "ask_user") {
+          const decision = await showInteractivePrompt(event);
+          if (event.resolve) event.resolve(decision);
+          // 审批被拒绝时 TUI 不输出（agent 循环会 yield info）
+          continue;
+        }
         renderAgentEvent(event, mainProvider, auxProvider);
       }
     } catch (err) {
@@ -771,6 +778,313 @@ function resetThinkingState() {
   responseLineBuf = "";
 }
 
+// ── 交互式提示（审批 / ask）──
+
+const APPROVAL_BG = chalk.bgRgb(60, 50, 0);   // 暗黄色
+const ASK_BG = chalk.bgRgb(0, 40, 50);         // 暗青色
+
+/**
+ * 显示交互式审批/提问提示，暂停 Agent 循环等待用户输入
+ * @returns {Promise<{ approved: boolean, answer?: string, modifiedParams?: object }>}
+ */
+function showInteractivePrompt(event) {
+  return new Promise((resolve) => {
+    const isAsk = event.type === "ask_user";
+    const bg = isAsk ? ASK_BG : APPROVAL_BG;
+    const W = termWidth();
+    const fill = " ".repeat(W);
+
+    if (isAsk) {
+      resolve(showAskPrompt(event, bg, W, fill));
+    } else {
+      resolve(showApprovalPrompt(event, bg, W, fill));
+    }
+  });
+}
+
+/** 审批提示：↑↓ 选择 [A]批准/[D]拒绝/[E]编辑 */
+function showApprovalPrompt(event, bg, W, fill) {
+  return new Promise((resolve) => {
+    const options = [
+      { key: "A", label: "批准执行", action: "approve" },
+      { key: "D", label: "拒绝", action: "deny" },
+      { key: "E", label: "编辑命令后执行", action: "edit" }
+    ];
+    let cursor = 0;
+
+    function render() {
+      const lines = [];
+      const toolLabel = `${event.toolName}: ${(event.command || event.params?.command || "").slice(0, W - 20)}`;
+      lines.push(bg(fill));
+      lines.push(bg("  [!] " + chalk.bold.white(toolLabel) + " ".repeat(Math.max(0, W - 6 - visualWidth(toolLabel)))));
+      lines.push(bg("  " + chalk.yellow((event.warning || "此操作需要审批").slice(0, W - 4)) + " ".repeat(Math.max(0, W - 2 - visualWidth(event.warning || "")))));
+      lines.push(bg("  " + " ".repeat(W - 4)));
+      for (let i = 0; i < options.length; i++) {
+        const prefix = i === cursor ? chalk.black.bgWhite(" > ") : "   ";
+        const keyHint = `[${options[i].key}]`;
+        lines.push(bg(prefix + chalk.bold(keyHint) + " " + options[i].label + " ".repeat(Math.max(0, W - 8 - keyHint.length - options[i].label.length))));
+      }
+      lines.push(bg("  " + " ".repeat(W - 4)));
+      lines.push(bg("  " + chalk.dim("↑↓ 选择  Enter 确认") + " ".repeat(Math.max(0, W - 2 - visualWidth("↑↓ 选择  Enter 确认")))));
+      lines.push(bg(fill));
+      process.stdout.write("\n" + lines.join("\n") + "\n");
+    }
+
+    function cleanup(buf) {
+      // 清除渲染的行
+      const totalLines = options.length + 7;
+      process.stdout.write(`\x1b[${totalLines}A\r\x1b[J`);
+      process.stdin.removeListener("data", onData);
+    }
+
+    function onData(buf) {
+      const str = buf.toString();
+      for (const ch of str) {
+        const code = ch.charCodeAt(0);
+        if (code === 27 && str.length > 1) {
+          // Arrow keys
+          if (str[1] === "[") {
+            if (str[2] === "A") { cursor = Math.max(0, cursor - 1); }
+            else if (str[2] === "B") { cursor = Math.min(options.length - 1, cursor + 1); }
+          }
+          clearAndRender();
+          return;
+        }
+        if (code === 13) {
+          cleanup();
+          const opt = options[cursor];
+          if (opt.action === "approve") {
+            resolve({ approved: true });
+          } else if (opt.action === "deny") {
+            resolve({ approved: false, reason: "用户拒绝" });
+          } else if (opt.action === "edit") {
+            // 编辑模式：让用户修改命令
+            resolve(showEditCommandPrompt(event));
+          }
+          return;
+        }
+        // 快捷键
+        const upper = ch.toUpperCase();
+        const match = options.findIndex(o => o.key === upper);
+        if (match >= 0) {
+          cleanup();
+          const opt = options[match];
+          if (opt.action === "approve") {
+            resolve({ approved: true });
+          } else if (opt.action === "deny") {
+            resolve({ approved: false, reason: "用户拒绝" });
+          } else if (opt.action === "edit") {
+            resolve(showEditCommandPrompt(event));
+          }
+          return;
+        }
+      }
+    }
+
+    function clearAndRender() {
+      const totalLines = options.length + 7;
+      process.stdout.write(`\x1b[${totalLines}A\r\x1b[J`);
+      render();
+    }
+
+    process.stdin.on("data", onData);
+    render();
+  });
+}
+
+/** 编辑命令模式 */
+function showEditCommandPrompt(event) {
+  return new Promise((resolve) => {
+    const originalCmd = event.command || event.params?.command || "";
+    let editBuffer = originalCmd;
+    let editCursor = editBuffer.length;
+
+    function render() {
+      const W = termWidth();
+      const fill = " ".repeat(W);
+      const lines = [
+        APPROVAL_BG(fill),
+        APPROVAL_BG("  [E] " + chalk.bold.white("编辑命令:") + " ".repeat(Math.max(0, W - 10))),
+        APPROVAL_BG("  > " + editBuffer.slice(0, W - 6) + " ".repeat(Math.max(0, W - 4 - Math.min(editBuffer.length, W - 6)))),
+        APPROVAL_BG("  " + " ".repeat(W - 4)),
+        APPROVAL_BG("  " + chalk.dim("Enter 确认执行  Ctrl+C 取消") + " ".repeat(Math.max(0, W - 2 - visualWidth("Enter 确认执行  Ctrl+C 取消")))),
+        APPROVAL_BG(fill)
+      ];
+      process.stdout.write("\n" + lines.join("\n") + "\n");
+    }
+
+    function cleanup() {
+      process.stdout.write("\x1b[6A\r\x1b[J");
+      process.stdin.removeListener("data", onData);
+    }
+
+    function onData(buf) {
+      const str = buf.toString();
+      for (const ch of str) {
+        const code = ch.charCodeAt(0);
+        if (code === 3) { cleanup(); resolve({ approved: false, reason: "用户取消" }); return; }
+        if (code === 13) {
+          cleanup();
+          resolve({ approved: true, modifiedParams: { ...event.params, command: editBuffer, requires_approval: true } });
+          return;
+        }
+        if (code === 127) {
+          if (editCursor > 0) {
+            editBuffer = editBuffer.slice(0, editCursor - 1) + editBuffer.slice(editCursor);
+            editCursor--;
+          }
+        } else if (code >= 32) {
+          editBuffer = editBuffer.slice(0, editCursor) + ch + editBuffer.slice(editCursor);
+          editCursor++;
+        }
+        clearAndRender();
+      }
+    }
+
+    function clearAndRender() {
+      process.stdout.write("\x1b[6A\r\x1b[J");
+      render();
+    }
+
+    process.stdin.on("data", onData);
+    render();
+  });
+}
+
+/** ask 提问提示：↑↓ 选择选项或自由输入 */
+function showAskPrompt(event, bg, W, fill) {
+  return new Promise((resolve) => {
+    const question = event.question || "请回答";
+    const options = event.options || null;
+    const hasOptions = Array.isArray(options) && options.length > 0;
+
+    if (hasOptions) {
+      resolve(showAskWithOptions(question, options, bg, W, fill));
+    } else {
+      resolve(showAskFreeInput(question, bg, W, fill));
+    }
+  });
+}
+
+function showAskWithOptions(question, options, bg, W, fill) {
+  return new Promise((resolve) => {
+    const items = [...options, "__custom__"];
+    let cursor = 0;
+
+    function render() {
+      const lines = [];
+      lines.push(bg(fill));
+      lines.push(bg("  ? " + chalk.bold.white(question.slice(0, W - 6)) + " ".repeat(Math.max(0, W - 4 - visualWidth(question.slice(0, W - 6))))));
+      lines.push(bg("  " + " ".repeat(W - 4)));
+      for (let i = 0; i < items.length; i++) {
+        const prefix = i === cursor ? chalk.black.bgWhite(" > ") : "   ";
+        if (items[i] === "__custom__") {
+          lines.push(bg(prefix + chalk.dim("自定义输入...") + " ".repeat(Math.max(0, W - 6 - visualWidth("自定义输入...")))));
+        } else {
+          lines.push(bg(prefix + String(items[i]).slice(0, W - 6) + " ".repeat(Math.max(0, W - 4 - visualWidth(String(items[i]).slice(0, W - 6))))));
+        }
+      }
+      lines.push(bg("  " + " ".repeat(W - 4)));
+      lines.push(bg("  " + chalk.dim("↑↓ 选择  Enter 确认") + " ".repeat(Math.max(0, W - 2 - visualWidth("↑↓ 选择  Enter 确认")))));
+      lines.push(bg(fill));
+      process.stdout.write("\n" + lines.join("\n") + "\n");
+    }
+
+    const totalLines = items.length + 5;
+
+    function cleanup() {
+      process.stdout.write(`\x1b[${totalLines}A\r\x1b[J`);
+      process.stdin.removeListener("data", onData);
+    }
+
+    function onData(buf) {
+      const str = buf.toString();
+      for (const ch of str) {
+        const code = ch.charCodeAt(0);
+        if (code === 27 && str.length > 1 && str[1] === "[") {
+          if (str[2] === "A") cursor = Math.max(0, cursor - 1);
+          else if (str[2] === "B") cursor = Math.min(items.length - 1, cursor + 1);
+          clearAndRender(); return;
+        }
+        if (code === 13) {
+          cleanup();
+          if (items[cursor] === "__custom__") {
+            showAskFreeInput(question, bg, W, fill).then(r => resolve(r));
+          } else {
+            resolve({ approved: true, answer: items[cursor] });
+          }
+          return;
+        }
+        if (code === 3) { cleanup(); resolve({ approved: false, reason: "用户取消" }); return; }
+      }
+    }
+
+    function clearAndRender() {
+      process.stdout.write(`\x1b[${totalLines}A\r\x1b[J`);
+      render();
+    }
+
+    process.stdin.on("data", onData);
+    render();
+  });
+}
+
+function showAskFreeInput(question, bg, W, fill) {
+  return new Promise((resolve) => {
+    let inputBuffer = "";
+    let inputCursor = 0;
+
+    function render() {
+      const lines = [
+        bg(fill),
+        bg("  ? " + chalk.bold.white(question.slice(0, W - 6)) + " ".repeat(Math.max(0, W - 4 - visualWidth(question.slice(0, W - 6))))),
+        bg("  " + " ".repeat(W - 4)),
+        bg("  > " + inputBuffer.slice(0, W - 6) + " ".repeat(Math.max(0, W - 4 - Math.min(inputBuffer.length, W - 6)))),
+        bg("  " + " ".repeat(W - 4)),
+        bg("  " + chalk.dim("Enter 确认  Ctrl+C 取消") + " ".repeat(Math.max(0, W - 2 - visualWidth("Enter 确认  Ctrl+C 取消")))),
+        bg(fill)
+      ];
+      process.stdout.write("\n" + lines.join("\n") + "\n");
+    }
+
+    function cleanup() {
+      process.stdout.write("\x1b[7A\r\x1b[J");
+      process.stdin.removeListener("data", onData);
+    }
+
+    function onData(buf) {
+      const str = buf.toString();
+      for (const ch of str) {
+        const code = ch.charCodeAt(0);
+        if (code === 3) { cleanup(); resolve({ approved: false, reason: "用户取消" }); return; }
+        if (code === 13) {
+          cleanup();
+          resolve({ approved: true, answer: inputBuffer.trim() || "(未回答)" });
+          return;
+        }
+        if (code === 127) {
+          if (inputCursor > 0) {
+            inputBuffer = inputBuffer.slice(0, inputCursor - 1) + inputBuffer.slice(inputCursor);
+            inputCursor--;
+          }
+        } else if (code >= 32) {
+          inputBuffer = inputBuffer.slice(0, inputCursor) + ch + inputBuffer.slice(inputCursor);
+          inputCursor++;
+        }
+        clearAndRender();
+      }
+    }
+
+    function clearAndRender() {
+      process.stdout.write("\x1b[7A\r\x1b[J");
+      render();
+    }
+
+    process.stdin.on("data", onData);
+    render();
+  });
+}
+
 // ── 渲染 Agent 事件 ──
 
 function renderAgentEvent(event, mainProvider, auxProvider) {
@@ -809,12 +1123,6 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
     case "tool_start": {
       flushResponseLines();
       flushResponseRemaining();
-      if (event.requiresApproval) {
-        process.stdout.write("\n   " + chalk.yellow.bold("⚠ 需要确认:"));
-        process.stdout.write("\n   " + chalk.yellow(JSON.stringify(event.toolResult, null, 2)));
-        process.stdout.write("\n   " + chalk.gray("(审批功能开发中，操作将继续运行)\n\n"));
-        return;
-      }
       // 3 行绿色背景块：空白行 + 标签行 + 空白行
       const W = termWidth();
       const fill = " ".repeat(W);
@@ -857,7 +1165,7 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
       // 紫色背景块：子 Agent 任务
       const W = termWidth();
       const fill = " ".repeat(W);
-      const label = `🤖 子Agent: ${(event.task || "").slice(0, 80)}`;
+      const label = `[Sub] ${(event.task || "").slice(0, 80)}`;
       const cleanLabel = label.replace(/\x1b\[[0-9;]*m/g, "");
       const pad = Math.max(0, W - 3 - visualWidth(cleanLabel));
       process.stdout.write("\n" + SUBAGENT_BG(fill) + "\n");
@@ -873,7 +1181,7 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
       const fill = " ".repeat(W);
       const result = event.toolResult || {};
       const success = result.success !== false;
-      const icon = success ? chalk.green("✓") : chalk.red("✗");
+      const icon = success ? chalk.green("[OK]") : chalk.red("[FAIL]");
       const type = result.type === "delegate_parallel" ? "并行子Agent" : "子Agent";
       const count = result.count ? ` (${result.completed}/${result.count} 完成)` : "";
       const label = `${icon} ${type}: ${(result.task || event.task || "").slice(0, 60)}${count}`;
