@@ -956,7 +956,7 @@ function showAskWithOptions(question, options, bg, W) {
       process.stdout.write(lines.join("\n") + "\n");
     }
 
-    const totalLines = items.length + 5;
+    const totalLines = items.length + 6;
 
     function cleanup() {
       process.stdout.write(`\x1b[${totalLines}A\r\x1b[J`);
