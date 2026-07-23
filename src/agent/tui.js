@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { runAgentLoop, runAuxCall } from "./agent-loop.js";
+import { runAgentLoop } from "./agent-loop.js";
 import {
   printUserMsg, printThinkingLabel, BOX, termWidth,
   USER_MSG_BG
@@ -15,18 +15,16 @@ import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
 /**
  * 启动 Agent TUI 循环
- * @param {object} context - { mainProvider, auxProvider, composite, workingDir, mainModel, auxModel }
+ * @param {object} context - { mainProvider, composite, workingDir, mainModel }
  */
 export async function agentTui(context) {
-  const { composite, mainProvider, auxProvider, workingDir, mainModel, auxModel,
+  const { composite, mainProvider, workingDir, mainModel,
     hooks, extTuiCommands = [] } = context;
 
   // 显示头部（含 CHAT2CLI logo）
   printAgentHeader({
     mainLabel: mainProvider.label,
-    auxLabel: auxProvider.label,
     mainModel,
-    auxModel,
     projectName: composite.name,
     workingDir: workingDir || composite.workingDir
   });
@@ -627,7 +625,7 @@ export async function agentTui(context) {
           // 审批被拒绝时 TUI 不输出（agent 循环会 yield info）
           continue;
         }
-        renderAgentEvent(event, mainProvider, auxProvider);
+        renderAgentEvent(event, mainProvider);
       }
     } catch (err) {
       process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
@@ -651,7 +649,7 @@ export async function agentTui(context) {
         printUserMsg(input);
         try {
           const args = input.slice(extName.length).trim();
-          await extCmd.handler(args, { composite, workingDir, mainProvider, auxProvider });
+          await extCmd.handler(args, { composite, workingDir, mainProvider });
         } catch (err) {
           process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
         }
@@ -668,7 +666,7 @@ export async function agentTui(context) {
 
       case "/help":
         printUserMsg(input);
-        printAgentHelp();
+        printAgentHelp(extTuiCommands);
         break;
 
       case "/clear":
@@ -676,9 +674,7 @@ export async function agentTui(context) {
         process.stdout.write("\x1b[2J\x1b[H");
         printAgentHeader({
           mainLabel: mainProvider.label,
-          auxLabel: auxProvider.label,
           mainModel,
-          auxModel,
           projectName: composite.name,
           workingDir: workingDir || composite.workingDir
         });
@@ -700,40 +696,12 @@ export async function agentTui(context) {
         }
         break;
 
-      case "/aux": {
-        const auxTask = input.slice(5).trim();
-        if (!auxTask) {
-          process.stdout.write("   " + chalk.yellow("用法: /aux <任务描述>\n\n"));
-          return;
-        }
-        printUserMsg(`/aux ${auxTask}`);
-        process.stdout.write("   " + chalk.magenta("[辅助AI] ") + chalk.gray("处理中...\n\n"));
-        try {
-          for await (const event of runAuxCall(auxTask, context)) {
-            if (event.source === "aux") {
-              if (event.type === "thinking") {
-                process.stdout.write(chalk.gray.dim(event.text));
-              } else if (event.type === "response" || event.type === "done") {
-                process.stdout.write("   " + event.text + "\n\n");
-              }
-            }
-            if (event.type === "error") {
-              process.stdout.write("   " + chalk.red("✗ ") + event.text + "\n\n");
-            }
-          }
-        } catch (err) {
-          process.stdout.write("   " + chalk.red("✗ ") + err.message + "\n\n");
-        }
-        break;
-      }
-
       case "/context":
         printUserMsg(input);
         const msgs = composite.messages || [];
         process.stdout.write(`   ${chalk.bold("复合对话")}: ${composite.name}\n`);
         process.stdout.write(`   ${chalk.gray("消息数")}: ${msgs.length}\n`);
-        process.stdout.write(`   ${chalk.gray("主AI")}: ${mainProvider.label} (session: ${composite.main.sessionId ? "已创建" : "未创建"})\n`);
-        process.stdout.write(`   ${chalk.gray("辅助AI")}: ${auxProvider.label} (session: ${composite.aux.sessionId ? "已创建" : "未创建"})\n\n`);
+        process.stdout.write(`   ${chalk.gray("AI")}: ${mainProvider.label} (session: ${composite.main.sessionId ? "已创建" : "未创建"})\n\n`);
         break;
 
       default:
@@ -783,27 +751,40 @@ function resetThinkingState() {
 const APPROVAL_BG = chalk.bgRgb(60, 50, 0);   // 暗黄色
 const ASK_BG = chalk.bgRgb(0, 40, 50);         // 暗青色
 
+/** 前缀 + 内容 + 自动补齐空格到终端宽度 W */
+function padBg(bg, prefix, content, W) {
+  const vw = visualWidth(prefix) + visualWidth(content);
+  return bg(prefix + content + " ".repeat(Math.max(0, W - vw)));
+}
+
+/** 满宽空行 */
+function emptyBg(bg, W) {
+  return bg(" ".repeat(W));
+}
+
+/** 满宽行（无前缀） */
+function fullBg(bg, content, W) {
+  return padBg(bg, "", content, W);
+}
+
 /**
  * 显示交互式审批/提问提示，暂停 Agent 循环等待用户输入
- * @returns {Promise<{ approved: boolean, answer?: string, modifiedParams?: object }>}
  */
 function showInteractivePrompt(event) {
   return new Promise((resolve) => {
     const isAsk = event.type === "ask_user";
     const bg = isAsk ? ASK_BG : APPROVAL_BG;
     const W = termWidth();
-    const fill = " ".repeat(W);
-
     if (isAsk) {
-      resolve(showAskPrompt(event, bg, W, fill));
+      resolve(showAskPrompt(event, bg, W));
     } else {
-      resolve(showApprovalPrompt(event, bg, W, fill));
+      resolve(showApprovalPrompt(event, bg, W));
     }
   });
 }
 
-/** 审批提示：↑↓ 选择 [A]批准/[D]拒绝/[E]编辑 */
-function showApprovalPrompt(event, bg, W, fill) {
+/** 审批提示 */
+function showApprovalPrompt(event, bg, W) {
   return new Promise((resolve) => {
     const options = [
       { key: "A", label: "批准执行", action: "approve" },
@@ -811,28 +792,30 @@ function showApprovalPrompt(event, bg, W, fill) {
       { key: "E", label: "编辑命令后执行", action: "edit" }
     ];
     let cursor = 0;
+    const toolLabel = `${event.toolName}: ${(event.command || event.params?.command || "").slice(0, W - 20)}`;
+    const warningText = (event.warning || "此操作需要审批");
+    const hintLine = "^v 选择  Enter 确认";
 
     function render() {
       const lines = [];
-      const toolLabel = `${event.toolName}: ${(event.command || event.params?.command || "").slice(0, W - 20)}`;
-      lines.push(bg(fill));
-      lines.push(bg("  [!] " + chalk.bold.white(toolLabel) + " ".repeat(Math.max(0, W - 6 - visualWidth(toolLabel)))));
-      lines.push(bg("  " + chalk.yellow((event.warning || "此操作需要审批").slice(0, W - 4)) + " ".repeat(Math.max(0, W - 2 - visualWidth(event.warning || "")))));
-      lines.push(bg("  " + " ".repeat(W - 4)));
+      lines.push(emptyBg(bg, W));
+      lines.push(padBg(bg, "  [!] ", chalk.bold.white(toolLabel), W));
+      lines.push(padBg(bg, "  ", chalk.yellow(warningText), W));
+      lines.push(emptyBg(bg, W));
       for (let i = 0; i < options.length; i++) {
-        const prefix = i === cursor ? chalk.black.bgWhite(" > ") : "   ";
-        const keyHint = `[${options[i].key}]`;
-        lines.push(bg(prefix + chalk.bold(keyHint) + " " + options[i].label + " ".repeat(Math.max(0, W - 8 - keyHint.length - options[i].label.length))));
+        const marker = i === cursor ? chalk.black.bgWhite(" > ") : "   ";
+        const keyHint = chalk.bold(`[${options[i].key}]`);
+        lines.push(padBg(bg, marker + keyHint + " ", options[i].label, W));
       }
-      lines.push(bg("  " + " ".repeat(W - 4)));
-      lines.push(bg("  " + chalk.dim("^v 选择  Enter 确认") + " ".repeat(Math.max(0, W - 2 - visualWidth("^v 选择  Enter 确认")))));
-      lines.push(bg(fill));
+      lines.push(emptyBg(bg, W));
+      lines.push(padBg(bg, "  ", chalk.dim(hintLine), W));
+      lines.push(emptyBg(bg, W));
       process.stdout.write(lines.join("\n") + "\n");
     }
 
-    function cleanup(buf) {
-      // 清除渲染的行：fill + label + warning + blank + options + blank + hint + fill
-      const totalLines = options.length + 5;
+    const totalLines = options.length + 7;
+
+    function cleanup() {
       process.stdout.write(`\x1b[${totalLines}A\r\x1b[J`);
       process.stdin.removeListener("data", onData);
     }
@@ -842,47 +825,34 @@ function showApprovalPrompt(event, bg, W, fill) {
       for (const ch of str) {
         const code = ch.charCodeAt(0);
         if (code === 27 && str.length > 1) {
-          // Arrow keys
           if (str[1] === "[") {
             if (str[2] === "A") { cursor = Math.max(0, cursor - 1); }
             else if (str[2] === "B") { cursor = Math.min(options.length - 1, cursor + 1); }
           }
-          clearAndRender();
-          return;
+          clearAndRender(); return;
         }
         if (code === 13) {
           cleanup();
           const opt = options[cursor];
-          if (opt.action === "approve") {
-            resolve({ approved: true });
-          } else if (opt.action === "deny") {
-            resolve({ approved: false, reason: "用户拒绝" });
-          } else if (opt.action === "edit") {
-            // 编辑模式：让用户修改命令
-            resolve(showEditCommandPrompt(event));
-          }
+          if (opt.action === "approve") resolve({ approved: true });
+          else if (opt.action === "deny") resolve({ approved: false, reason: "用户拒绝" });
+          else if (opt.action === "edit") resolve(showEditCommandPrompt(event));
           return;
         }
-        // 快捷键
         const upper = ch.toUpperCase();
         const match = options.findIndex(o => o.key === upper);
         if (match >= 0) {
           cleanup();
           const opt = options[match];
-          if (opt.action === "approve") {
-            resolve({ approved: true });
-          } else if (opt.action === "deny") {
-            resolve({ approved: false, reason: "用户拒绝" });
-          } else if (opt.action === "edit") {
-            resolve(showEditCommandPrompt(event));
-          }
+          if (opt.action === "approve") resolve({ approved: true });
+          else if (opt.action === "deny") resolve({ approved: false, reason: "用户拒绝" });
+          else if (opt.action === "edit") resolve(showEditCommandPrompt(event));
           return;
         }
       }
     }
 
     function clearAndRender() {
-      const totalLines = options.length + 5;
       process.stdout.write(`\x1b[${totalLines}A\r\x1b[J`);
       render();
     }
@@ -901,14 +871,13 @@ function showEditCommandPrompt(event) {
 
     function render() {
       const W = termWidth();
-      const fill = " ".repeat(W);
       const lines = [
-        APPROVAL_BG(fill),
-        APPROVAL_BG("  [E] " + chalk.bold.white("编辑命令:") + " ".repeat(Math.max(0, W - 10))),
-        APPROVAL_BG("  > " + editBuffer.slice(0, W - 6) + " ".repeat(Math.max(0, W - 4 - Math.min(editBuffer.length, W - 6)))),
-        APPROVAL_BG("  " + " ".repeat(W - 4)),
-        APPROVAL_BG("  " + chalk.dim("Enter 确认执行  Ctrl+C 取消") + " ".repeat(Math.max(0, W - 2 - visualWidth("Enter 确认执行  Ctrl+C 取消")))),
-        APPROVAL_BG(fill)
+        emptyBg(APPROVAL_BG, W),
+        padBg(APPROVAL_BG, "  [E] ", chalk.bold.white("编辑命令:"), W),
+        padBg(APPROVAL_BG, "  > ", editBuffer, W),
+        emptyBg(APPROVAL_BG, W),
+        padBg(APPROVAL_BG, "  ", chalk.dim("Enter 确认执行  Ctrl+C 取消"), W),
+        emptyBg(APPROVAL_BG, W)
       ];
       process.stdout.write(lines.join("\n") + "\n");
     }
@@ -925,7 +894,7 @@ function showEditCommandPrompt(event) {
         if (code === 3) { cleanup(); resolve({ approved: false, reason: "用户取消" }); return; }
         if (code === 13) {
           cleanup();
-          resolve({ approved: true, modifiedParams: { ...event.params, command: editBuffer, requires_approval: true } });
+          resolve({ approved: true, modifiedParams: { ...event.params, command: editBuffer } });
           return;
         }
         if (code === 127) {
@@ -951,42 +920,39 @@ function showEditCommandPrompt(event) {
   });
 }
 
-/** ask 提问提示：↑↓ 选择选项或自由输入 */
-function showAskPrompt(event, bg, W, fill) {
+/** ask 提问提示 */
+function showAskPrompt(event, bg, W) {
   return new Promise((resolve) => {
     const question = event.question || "请回答";
     const options = event.options || null;
     const hasOptions = Array.isArray(options) && options.length > 0;
-
-    if (hasOptions) {
-      resolve(showAskWithOptions(question, options, bg, W, fill));
-    } else {
-      resolve(showAskFreeInput(question, bg, W, fill));
-    }
+    if (hasOptions) resolve(showAskWithOptions(question, options, bg, W));
+    else resolve(showAskFreeInput(question, bg, W));
   });
 }
 
-function showAskWithOptions(question, options, bg, W, fill) {
+function showAskWithOptions(question, options, bg, W) {
   return new Promise((resolve) => {
     const items = [...options, "__custom__"];
     let cursor = 0;
+    const hintLine = "^v 选择  Enter 确认";
 
     function render() {
       const lines = [];
-      lines.push(bg(fill));
-      lines.push(bg("  ? " + chalk.bold.white(question.slice(0, W - 6)) + " ".repeat(Math.max(0, W - 4 - visualWidth(question.slice(0, W - 6))))));
-      lines.push(bg("  " + " ".repeat(W - 4)));
+      lines.push(emptyBg(bg, W));
+      lines.push(padBg(bg, "  ? ", chalk.bold.white(question), W));
+      lines.push(emptyBg(bg, W));
       for (let i = 0; i < items.length; i++) {
-        const prefix = i === cursor ? chalk.black.bgWhite(" > ") : "   ";
+        const marker = i === cursor ? chalk.black.bgWhite(" > ") : "   ";
         if (items[i] === "__custom__") {
-          lines.push(bg(prefix + chalk.dim("自定义输入...") + " ".repeat(Math.max(0, W - 6 - visualWidth("自定义输入...")))));
+          lines.push(padBg(bg, marker, chalk.dim("自定义输入..."), W));
         } else {
-          lines.push(bg(prefix + String(items[i]).slice(0, W - 6) + " ".repeat(Math.max(0, W - 4 - visualWidth(String(items[i]).slice(0, W - 6))))));
+          lines.push(padBg(bg, marker, String(items[i]), W));
         }
       }
-      lines.push(bg("  " + " ".repeat(W - 4)));
-      lines.push(bg("  " + chalk.dim("^v 选择  Enter 确认") + " ".repeat(Math.max(0, W - 2 - visualWidth("^v 选择  Enter 确认")))));
-      lines.push(bg(fill));
+      lines.push(emptyBg(bg, W));
+      lines.push(padBg(bg, "  ", chalk.dim(hintLine), W));
+      lines.push(emptyBg(bg, W));
       process.stdout.write(lines.join("\n") + "\n");
     }
 
@@ -1008,11 +974,8 @@ function showAskWithOptions(question, options, bg, W, fill) {
         }
         if (code === 13) {
           cleanup();
-          if (items[cursor] === "__custom__") {
-            showAskFreeInput(question, bg, W, fill).then(r => resolve(r));
-          } else {
-            resolve({ approved: true, answer: items[cursor] });
-          }
+          if (items[cursor] === "__custom__") showAskFreeInput(question, bg, W).then(r => resolve(r));
+          else resolve({ approved: true, answer: items[cursor] });
           return;
         }
         if (code === 3) { cleanup(); resolve({ approved: false, reason: "用户取消" }); return; }
@@ -1029,20 +992,20 @@ function showAskWithOptions(question, options, bg, W, fill) {
   });
 }
 
-function showAskFreeInput(question, bg, W, fill) {
+function showAskFreeInput(question, bg, W) {
   return new Promise((resolve) => {
     let inputBuffer = "";
     let inputCursor = 0;
 
     function render() {
       const lines = [
-        bg(fill),
-        bg("  ? " + chalk.bold.white(question.slice(0, W - 6)) + " ".repeat(Math.max(0, W - 4 - visualWidth(question.slice(0, W - 6))))),
-        bg("  " + " ".repeat(W - 4)),
-        bg("  > " + inputBuffer.slice(0, W - 6) + " ".repeat(Math.max(0, W - 4 - Math.min(inputBuffer.length, W - 6)))),
-        bg("  " + " ".repeat(W - 4)),
-        bg("  " + chalk.dim("Enter 确认  Ctrl+C 取消") + " ".repeat(Math.max(0, W - 2 - visualWidth("Enter 确认  Ctrl+C 取消")))),
-        bg(fill)
+        emptyBg(bg, W),
+        padBg(bg, "  ? ", chalk.bold.white(question), W),
+        emptyBg(bg, W),
+        padBg(bg, "  > ", inputBuffer, W),
+        emptyBg(bg, W),
+        padBg(bg, "  ", chalk.dim("Enter 确认  Ctrl+C 取消"), W),
+        emptyBg(bg, W)
       ];
       process.stdout.write(lines.join("\n") + "\n");
     }
@@ -1087,7 +1050,7 @@ function showAskFreeInput(question, bg, W, fill) {
 
 // ── 渲染 Agent 事件 ──
 
-function renderAgentEvent(event, mainProvider, auxProvider) {
+function renderAgentEvent(event, mainProvider) {
   switch (event.type || event.kind) {
     case "thinking": {
       if (!thinkingActive) {
@@ -1108,7 +1071,6 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
     }
 
     case "response": {
-      if (event.source === "aux") return;
       if (thinkingActive) {
         // thinking→response 切换：立即换行，让用户看到响应开始了
         process.stdout.write("\n");
@@ -1219,7 +1181,6 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
     }
 
     case "done": {
-      if (event.source === "aux") return;
       thinkingActive = false;
       flushResponseRemaining();
       process.stdout.write("\n");
@@ -1511,7 +1472,7 @@ function renderTodoResult(result) {
 //  Agent Header — CHAT2CLI logo + agent 信息
 // ═══════════════════════════════════════════════
 
-function printAgentHeader({ mainLabel, auxLabel, mainModel, auxModel, projectName, workingDir }) {
+function printAgentHeader({ mainLabel, mainModel, projectName, workingDir }) {
   const W = termWidth();
   const inner = W - 2;
 
@@ -1525,13 +1486,11 @@ function printAgentHeader({ mainLabel, auxLabel, mainModel, auxModel, projectNam
   ];
 
   const mainStr = `${mainLabel}  ${chalk.cyan(mainModel || "")}`;
-  const auxStr  = `${auxLabel}  ${chalk.cyan(auxModel || "")}`;
   const projStr = `${projectName || "-"}`;
 
   // Build info rows
   const infoRows = [
-    `  主AI: ${chalk.bold(mainStr)}`,
-    `  辅助: ${chalk.bold(auxStr)}`,
+    `  AI: ${chalk.bold(mainStr)}`,
     `  项目: ${chalk.bold(projStr)}  ${chalk.dim(workingDir || "")}`
   ];
 
@@ -1592,9 +1551,9 @@ function visualWidth(s) {
 
 // ── 帮助 ──
 
-function printAgentHelp() {
+function printAgentHelp(extTuiCommands) {
   // 扩展 TUI 命令的列表行
-  const extLines = extTuiCommands.length > 0
+  const extLines = (extTuiCommands || []).length > 0
     ? extTuiCommands.map((c) => `    /${c.name.padEnd(14)} ${c.description || ""}`).join("\n")
     : "    (无)";
 
@@ -1605,7 +1564,6 @@ function printAgentHelp() {
     /exit          退出
     /todo          查看任务清单
     /context       查看当前对话上下文
-    /aux <任务>    委托任务给辅助 AI
 
   扩展命令:
 ${extLines}

@@ -21,11 +21,9 @@ export function createComposite({ name, description = "", workingDir = process.c
     description,
     workingDir,
     main: { provider: null, accountId: null, sessionId: null },
-    aux: { provider: null, accountId: null, sessionId: null },
     messages: [],
     taskList: [],
     mainModel: null,
-    auxModel: null,
     createdAt: now,
     updatedAt: now
   };
@@ -104,22 +102,15 @@ export function setMainSession(composite, provider, accountId, sessionId) {
   return saveComposite(composite);
 }
 
-/** 设置辅助 AI 的远程会话信息 */
-export function setAuxSession(composite, provider, accountId, sessionId) {
-  composite.aux = { provider, accountId, sessionId };
+/** 设置使用的模型 */
+export function setModels(composite, mainModel) {
+  if (mainModel !== undefined) composite.mainModel = mainModel;
   return saveComposite(composite);
 }
 
 /** 更新任务清单 */
 export function updateTaskList(composite, taskList) {
   composite.taskList = taskList || [];
-  return saveComposite(composite);
-}
-
-/** 设置使用的模型 */
-export function setModels(composite, mainModel, auxModel) {
-  if (mainModel !== undefined) composite.mainModel = mainModel;
-  if (auxModel !== undefined) composite.auxModel = auxModel;
   return saveComposite(composite);
 }
 

@@ -165,16 +165,16 @@ const RUN_STATES = {
 export class SubagentManager {
   /**
    * @param {object} opts
-   * @param {object} opts.auxProvider - 辅助 AI provider
-   * @param {string} opts.auxModel - 辅助 AI 模型
+   * @param {object} opts.provider - AI provider
+   * @param {string} opts.model - AI 模型
    * @param {string} opts.workingDir - 工作目录
    * @param {number} [opts.maxTurns=5] - 默认最大轮次（可由 profile 覆盖）
    * @param {number} [opts.timeoutMs=120000] - 默认超时（可由 profile 覆盖）
    * @param {Function} [opts.onEvent] - 事件回调 (runId, eventType, data)
    */
   constructor(opts = {}) {
-    this.auxProvider = opts.auxProvider;
-    this.auxModel = opts.auxModel;
+    this.provider = opts.provider;
+    this.model = opts.model;
     this.workingDir = opts.workingDir || process.cwd();
     this.defaultMaxTurns = opts.maxTurns ?? 5;
     this.defaultTimeoutMs = opts.timeoutMs ?? 120000;
@@ -271,8 +271,8 @@ export class SubagentManager {
 
       const providerOpts = {
         prompt,
-        model: this.auxModel || undefined,
-        accountId: this.auxProvider.getDefaultAccount?.()?.id
+        model: this.model || undefined,
+        accountId: this.provider.getDefaultAccount?.()?.id
       };
       if (sessionId) {
         providerOpts.sessionId = sessionId;
@@ -280,7 +280,7 @@ export class SubagentManager {
       }
 
       try {
-        const resp = await this.auxProvider.startCompletion(messages, providerOpts);
+        const resp = await this.provider.startCompletion(messages, providerOpts);
 
         if (!resp || !resp.ok) {
           this._spinner?.stop("[FAIL] 请求失败");
@@ -301,7 +301,7 @@ export class SubagentManager {
         let thinkingText = "";
         let responseText = "";
 
-        if (this.auxProvider.name === "qwen") {
+        if (this.provider.name === "qwen") {
           const pending = [];
           let done = false, error = null;
           const consumePromise = consumeQwenStream(resp.body, (delta) => {
@@ -327,7 +327,7 @@ export class SubagentManager {
           }
           if (error) throw error;
           await consumePromise;
-        } else if (this.auxProvider.name === "deepseek") {
+        } else if (this.provider.name === "deepseek") {
           const { streamDeltasWithMessageId } = await import("../../providers/deepseek/chat.js");
           const stream = streamDeltasWithMessageId(resp);
           for await (const delta of stream.deltas) {

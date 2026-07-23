@@ -5,7 +5,6 @@ import {
 import { streamDeltasWithMessageId } from "../providers/deepseek/chat.js";
 import { executeToolCall, TOOL_DEFINITIONS } from "./tools/registry.js";
 import { buildMainSystemPrompt } from "./prompts/main-system.js";
-import { buildAuxSystemPrompt } from "./prompts/aux-system.js";
 import { appendMessage, updateTaskList, saveComposite } from "./storage/composite.js";
 import { getExtensionPromptSections } from "../extensions/index.js";
 import { SubagentManager } from "./subagents/manager.js";
@@ -174,23 +173,6 @@ function buildMessagesForMain(composite, workingDir) {
   return messages;
 }
 
-function buildMessagesForAux(composite, workingDir, task) {
-  const allTools = TOOL_DEFINITIONS;
-  const extSections = getExtensionPromptSections("aux");
-
-  let systemPrompt = buildAuxSystemPrompt({ workingDir, toolDefinitions: allTools });
-
-  // 追加扩展提示词片段（辅助 AI）
-  if (extSections.length > 0) {
-    systemPrompt += "\n\n" + extSections.join("\n\n");
-  }
-
-  return [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: task }
-  ];
-}
-
 function stripToolXml(text) {
   if (!text) return "";
   return text.replace(/<invoke\b[^>]*\/>/gi, "").replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, "").trim();
@@ -265,15 +247,13 @@ export async function* runAgentLoop(userInput, context) {
     mainProvider, composite, workingDir,
     maxTokens = DEFAULT_MAX_TOKENS,
     shellTimeout = 120000,
-    signal,
-    auxProvider,
-    auxModel
+    signal
   } = context;
 
-  // ── 创建子 Agent 管理器 ──
-  const subagentManager = auxProvider ? new SubagentManager({
-    auxProvider,
-    auxModel: auxModel || null,
+  // ── 创建子 Agent 管理器（使用主 AI provider）──
+  const subagentManager = mainProvider ? new SubagentManager({
+    provider: mainProvider,
+    model: context.mainModel || null,
     workingDir,
     timeoutMs: 120000,
     maxTurns: 5,
@@ -558,8 +538,10 @@ export async function* runAgentLoop(userInput, context) {
             if (approvalType === "ask") {
               toolResult = { result: { answer: decision.answer || "", type: "ask" } };
             } else {
-              // shell 等：用修改后的参数重新执行
-              const redoParams = decision.modifiedParams || { ...params, requires_approval: true };
+              // shell 等：用修改后的参数重新执行，_approved 标记绕过二次审批
+              const redoParams = decision.modifiedParams
+                ? { ...decision.modifiedParams, _approved: true }
+                : { ...params, _approved: true };
               toolResult = await executeToolCall(toolName, redoParams, {
                 workingDir,
                 taskList: composite.taskList || [],
@@ -617,48 +599,5 @@ export async function* runAgentLoop(userInput, context) {
       yield { type: "error", text: err.message };
       return;
     }
-  }
-}
-
-// ── 辅助 AI ──
-
-export async function* runAuxCall(userInput, context) {
-  const { auxProvider, composite, workingDir } = context;
-  appendMessage(composite, { role: "user", content: `[辅助AI任务] ${userInput}`, source: "user" });
-  const messages = buildMessagesForAux(composite, workingDir, userInput);
-  const prompt = buildPromptFromMessages(messages);
-
-  try {
-    const resp = await auxProvider.startCompletion(messages, {
-      prompt, model: context.auxModel, accountId: composite.aux.accountId
-    });
-
-    // 图片/视频生成结果（非 Response 流）
-    if (resp && resp._isImageResult) {
-      for await (const event of handleImageResult(resp, workingDir, "aux")) {
-        yield event;
-      }
-      appendMessage(composite, {
-        role: "assistant", content: `[图片生成] ${resp.url}`,
-        source: "aux"
-      });
-      yield { type: "done", text: resp.url, source: "aux" };
-      return;
-    }
-
-    if (!resp || !resp.ok) {
-      yield { type: "error", text: `辅助 AI (${auxProvider.label}) 请求失败` };
-      return;
-    }
-    const consumer = createAgentStreamConsumer(auxProvider, resp);
-    let fullText = "";
-    for await (const event of consumer.deltas()) {
-      fullText += event.text || "";
-      yield { ...event, source: "aux" };
-    }
-    appendMessage(composite, { role: "assistant", content: fullText, source: "aux" });
-    yield { type: "done", text: fullText, source: "aux" };
-  } catch (err) {
-    yield { type: "error", text: err.message };
   }
 }

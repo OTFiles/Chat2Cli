@@ -13,7 +13,7 @@ async function getExtContext() {
   if (!_extContext) {
     _extContext = await initExtensions({ cwd: process.cwd() }).catch((err) => {
       console.warn("[扩展] 初始化失败:", err.message);
-      return { hooks: { emit: async () => ({}) }, loaded: [], promptSections: { main: [], aux: [] } };
+      return { hooks: { emit: async () => ({}) }, loaded: [], promptSections: { main: [] } };
     });
   }
   return _extContext;
@@ -21,7 +21,7 @@ async function getExtContext() {
 
 /**
  * 从已登录账号中选取一个 provider 和账号
- * @param {string} role - "主AI" 或 "辅助AI"
+ * @param {string} role - 显示名称
  * @param {string} preferredProvider - 配置中预设的 provider 名
  * @returns {{ provider, accountId, providerName }}
  */
@@ -122,25 +122,16 @@ export async function runAgent(opts = {}) {
   // ── 获取配置 ──
   const agentPrefs = getAgentConfig();
 
-  // 选取主 AI
-  const main = await selectProvider("主AI", agentPrefs.mainProvider);
+  // 选取 AI
+  const main = await selectProvider("AI", agentPrefs.mainProvider);
   const mainProvider = getProvider(main.providerName);
   if (!mainProvider) {
-    printError(`未找到主 AI provider: ${main.providerName}`);
-    return;
-  }
-
-  // 选取辅助 AI
-  const aux = await selectProvider("辅助AI", agentPrefs.auxProvider);
-  const auxProvider = getProvider(aux.providerName);
-  if (!auxProvider) {
-    printError(`未找到辅助 AI provider: ${aux.providerName}`);
+    printError(`未找到 AI provider: ${main.providerName}`);
     return;
   }
 
   // 选取模型（仅新建时选择，继续对话时从 composite 恢复）
   let mainModel = null;
-  let auxModel = null;
 
   // ── 复合对话 ──
   let composite;
@@ -153,12 +144,9 @@ export async function runAgent(opts = {}) {
     }
     printInfo(`继续复合对话: ${chalk.bold(composite.name)}`);
 
-    // 更新 main/aux session 信息（如果 provider 变了）
+    // 更新 session 信息（如果 provider 变了）
     if (composite.main.provider !== main.providerName || composite.main.accountId !== main.accountId) {
       composite.main = { provider: main.providerName, accountId: main.accountId, sessionId: null };
-    }
-    if (composite.aux.provider !== aux.providerName || composite.aux.accountId !== aux.accountId) {
-      composite.aux = { provider: aux.providerName, accountId: aux.accountId, sessionId: null };
     }
   } else if (opts.new) {
     composite = createComposite({
@@ -207,45 +195,35 @@ export async function runAgent(opts = {}) {
     return;
   }
 
-  // 设置 main/aux 的初始 session（若尚未设置）
+  // 设置初始 session（若尚未设置）
   if (!composite.main.provider) {
     composite.main = { provider: main.providerName, accountId: main.accountId, sessionId: null };
-  }
-  if (!composite.aux.provider) {
-    composite.aux = { provider: aux.providerName, accountId: aux.accountId, sessionId: null };
   }
 
   // 选取模型：已有 composite 则恢复，否则交互选择
   mainModel = composite.mainModel || null;
-  auxModel = composite.auxModel || null;
 
   if (!mainModel) {
-    mainModel = await selectModel(mainProvider, "主AI", null);
-  }
-  if (!auxModel) {
-    auxModel = await selectModel(auxProvider, "辅助AI", null);
+    mainModel = await selectModel(mainProvider, "AI", null);
   }
 
-  setModels(composite, mainModel, auxModel);
+  setModels(composite, mainModel);
 
   // 保存首次组装完毕的 composite
   const { saveComposite } = await import("../agent/storage/composite.js");
   saveComposite(composite);
 
-  // 保存 agent 配置偏好（下次默认使用相同配置）
+  // 保存 agent 配置偏好
   const agentConfig = getAgentConfig();
   if (!agentConfig.mainProvider) {
     setAgentConfigKey("mainProvider", main.providerName);
-    setAgentConfigKey("auxProvider", aux.providerName);
   }
 
   // ── 启动 TUI ──
   await agentTui({
     mainProvider,
-    auxProvider,
     composite,
     mainModel,
-    auxModel,
     workingDir: composite.workingDir || process.cwd(),
     shellTimeout: opts.timeout ?? 120000,
     maxTokens: opts.maxTokens ?? 1000000,
@@ -268,12 +246,11 @@ async function listAgents() {
 
   printInfo(`共 ${chalk.bold(composites.length)} 个复合对话\n`);
   printTable(
-    ["ID", "名称", "主AI", "辅助AI", "消息数", "更新时间"],
+    ["ID", "名称", "AI", "消息数", "更新时间"],
     composites.map((c) => [
       c.id.slice(0, 8),
       c.name || "-",
       c.main.provider || "-",
-      c.aux.provider || "-",
       String(c.messages?.length || 0),
       formatDate(c.updatedAt)
     ])
@@ -291,7 +268,7 @@ async function batchDeleteAgents() {
 
   const entries = composites.map((c) => ({
     id: c.id,
-    label: `${c.name || "未命名"}  ${c.main.provider || "-"}/${c.aux.provider || "-"}  (${c.messages?.length || 0} 条)`
+    label: `${c.name || "未命名"}  ${c.main.provider || "-"}  (${c.messages?.length || 0} 条)`
   }));
 
   // 行内实现 multiSelectPicker（避免跨文件依赖）

@@ -175,11 +175,11 @@ function isDangerous(cmd) {
 }
 
 function executeShell(params, context) {
-  const { command, requires_approval, working_dir } = params;
+  const { command, requires_approval, working_dir, _approved } = params;
   if (!command) return { result: { error: "缺少 command 参数" } };
 
-  // 审批触发：Agent 主动要求审批 或 命令匹配危险模式
-  if (requires_approval || isDangerous(command)) {
+  // 审批触发：已批准的操作(_approved)直接放行，否则检查
+  if (!_approved && (requires_approval || isDangerous(command))) {
     const warning = requires_approval
       ? `Agent 请求审批: ${command}`
       : `命令可能危险: ${command}`;

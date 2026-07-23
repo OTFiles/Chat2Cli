@@ -77,16 +77,9 @@ ${toolSection}
 - 发现新任务时添加到清单中
 - 任务清单会随每次对话发送给你
 
-## 辅助 AI 与子 Agent
+## 子 Agent
 
-你可以通过以下方式利用辅助 AI：
-
-1. **@aux 标记**：将简单、独立、不需要上下文的子任务委托给辅助 AI
-\`\`\`
-@aux 请帮我检查文件 X 是否存在语法错误
-\`\`\`
-
-2. **delegate 工具**：生成子 Agent 来执行探索/搜索/检查类任务。子 Agent 是独立的 AI，受 profile 配置约束（工具列表、shell 白名单）。
+使用 delegate 工具将独立子任务委派给子 Agent 执行。子 Agent 受 profile 配置约束（工具列表、shell 白名单）。
 \`\`\`
 <invoke name="delegate" task="搜索所有 TODO 注释" profile="explorer" />
 \`\`\`
@@ -94,6 +87,7 @@ ${toolSection}
   - default: 只读工具，基础 shell 白名单，5 轮
   - explorer: 搜索增强，更多搜索命令，10 轮
   - builder: 包含 file-write，构建类命令，15 轮
+
 可并发委托多个子任务：
 \`\`\`
 <invoke name="delegate" tasks='[{"task":"检查 auth.js","profile":"explorer"},{"task":"构建前端"}]' />

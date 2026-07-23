@@ -229,8 +229,7 @@ program
   .option("--dir <path>", "指定工作目录")
   .addHelpText("after", `
 ${chalk.dim("说明:")}
-  Agent 模式使用主 AI + 辅助 AI 双账号协作，能自动使用工具完成编程任务。
-  支持 delegate 工具委派子 Agent、ask 工具询问用户、工具审批机制。
+  Agent 模式使用 AI 自动规划并执行任务，支持工具调用、子 Agent 委派和用户交互。
 
 ${chalk.dim("用法:")}
   ${chalk.cyan("chat2cli agent")}           新建或继续复合对话
@@ -244,7 +243,6 @@ ${chalk.dim("TUI 内置命令:")}
   ${chalk.cyan("/help")}       显示帮助
   ${chalk.cyan("/todo")}       查看任务清单
   ${chalk.cyan("/context")}    查看当前上下文
-  ${chalk.cyan("/aux <任务>")}  委托任务给辅助 AI
   ${chalk.cyan("/clear")}      清屏
   ${chalk.cyan("/exit")}       退出
 
