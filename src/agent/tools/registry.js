@@ -60,6 +60,16 @@ export const TOOL_DEFINITIONS = [
       action: { type: "string", required: true, description: "list（查看）或 update（更新）" },
       tasks: { type: "array", required: false, description: "action=update 时的任务数组 [{id, content, status}]，status: pending|in_progress|completed" }
     }
+  },
+  {
+    name: "delegate",
+    description: "将子任务委托给子 Agent 执行。子 Agent 是独立的 AI，拥有 shell、file-read、file-search 工具。适合独立、不需上下文的探索/搜索/检查类任务。可并发委托多个子任务。",
+    parameters: {
+      task: { type: "string", required: true, description: "子任务描述（要具体、可验证）" },
+      tasks: { type: "array", required: false, description: "并发委托多个子任务时的任务数组 [{ task: '描述', tools: ['shell','file-read'] }]" },
+      tools: { type: "array", required: false, description: "允许子 Agent 使用的工具名称列表，默认 ['shell','file-read','file-search']" },
+      max_turns: { type: "number", required: false, description: "子 Agent 最大工具调用轮次，默认 5" }
+    }
   }
 ];
 
@@ -134,6 +144,8 @@ export async function executeToolCall(toolName, params, context = {}) {
       return executeFileSearch(params, context);
     case "todo":
       return executeTodo(params, context);
+    case "delegate":
+      return executeDelegate(params, context);
     default:
       return { result: { error: `未知工具: ${toolName}` } };
   }
@@ -414,6 +426,84 @@ function searchByContent(baseDir, pattern, cwd) {
     }
     return { result: { error: `搜索失败: ${err.message}` } };
   }
+}
+
+// ── delegate ──
+
+async function executeDelegate(params, context) {
+  const manager = context.subagentManager;
+  if (!manager) {
+    return { result: { error: "子 Agent 管理器未初始化，无法委托任务" } };
+  }
+
+  const { task, tasks, tools, max_turns } = params;
+
+  // 并发委托模式
+  if (tasks && Array.isArray(tasks) && tasks.length > 0) {
+    const taskItems = tasks.map((t) => ({
+      task: typeof t === "string" ? t : t.task,
+      tools: t.tools || tools || undefined,
+      maxTurns: t.max_turns || max_turns || undefined
+    }));
+
+    // 通过 context.onSubagentEvent 转发事件
+    if (context.onSubagentEvent) {
+      context.onSubagentEvent(null, "parallel_start", { count: taskItems.length, tasks: taskItems.map(t => t.task) });
+    }
+
+    const results = await manager.spawnParallel(taskItems, 3);
+
+    // 汇总结果
+    const summary = results.map((r, i) => {
+      const status = r.status === "completed" ? "✓" : r.status === "failed" ? "✗" : "○";
+      return `[${status}] 子任务 ${i + 1}: ${r.task.slice(0, 80)}\
+结果: ${(r.result || r.error || "无").slice(0, 500)}`;
+    }).join("\
+\
+");
+
+    return {
+      result: {
+        success: true,
+        type: "delegate_parallel",
+        count: results.length,
+        completed: results.filter(r => r.status === "completed").length,
+        failed: results.filter(r => r.status === "failed" || r.status === "timed_out" || r.status === "cancelled").length,
+        summary,
+        details: results.map(r => ({
+          id: r.id,
+          task: r.task.slice(0, 120),
+          status: r.status,
+          result: (r.result || r.error || "").slice(0, 1000)
+        }))
+      }
+    };
+  }
+
+  // 单任务委托模式
+  if (!task) {
+    return { result: { error: "需要 task（任务描述）或 tasks（任务数组）参数" } };
+  }
+
+  if (context.onSubagentEvent) {
+    context.onSubagentEvent(null, "spawn_single", { task });
+  }
+
+  const result = await manager.spawnAndWait(task, {
+    tools: tools || undefined,
+    maxTurns: max_turns || undefined
+  });
+
+  return {
+    result: {
+      success: result.status === "completed",
+      type: "delegate",
+      task: task.slice(0, 200),
+      status: result.status,
+      result: result.result || result.error || "",
+      error: result.error || null
+    }
+  };
 }
 
 // ── todo ──

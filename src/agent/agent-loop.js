@@ -8,9 +8,11 @@ import { buildMainSystemPrompt } from "./prompts/main-system.js";
 import { buildAuxSystemPrompt } from "./prompts/aux-system.js";
 import { appendMessage, updateTaskList, saveComposite } from "./storage/composite.js";
 import { getExtensionPromptSections } from "../extensions/index.js";
+import { SubagentManager } from "./subagents/manager.js";
 import { existsSync, mkdirSync, createWriteStream } from "node:fs";
 import { join, extname } from "node:path";
 import { createHash } from "node:crypto";
+import chalk from "chalk";
 
 // ═══════════════════════════════════════════════
 //  图片生成结果处理（agent 模式）
@@ -127,6 +129,11 @@ function formatToolResultCompact(toolName, result) {
         return `TODO: ${result.message || "任务清单"}\n${items}`;
       }
       return JSON.stringify(result).slice(0, 500);
+    }
+    case "delegate": {
+      if (result.summary) return `DELEGATE: ${result.summary.slice(0, 4000)}`;
+      if (result.result) return `DELEGATE: ${String(result.result).slice(0, 4000)}`;
+      return `DELEGATE: ${result.status || "完成"}`;
     }
     default: return JSON.stringify(result).slice(0, 1000);
   }
@@ -258,8 +265,46 @@ export async function* runAgentLoop(userInput, context) {
     mainProvider, composite, workingDir,
     maxTokens = DEFAULT_MAX_TOKENS,
     shellTimeout = 120000,
-    signal
+    signal,
+    auxProvider,
+    auxModel
   } = context;
+
+  // ── 创建子 Agent 管理器 ──
+  const subagentManager = auxProvider ? new SubagentManager({
+    auxProvider,
+    auxModel: auxModel || null,
+    workingDir,
+    timeoutMs: 120000,
+    maxTurns: 5,
+    onEvent: (runId, eventType, data) => {
+      // 子 agent 内部进度回调 — 在 executeDelegate 的 await 期间
+      // 直接输出到 stdout 提供实时反馈
+      if (eventType === "spawned") {
+        process.stdout.write(`  ${chalk.dim("⏳")} 子Agent已启动: ${(data.task || "").slice(0, 60)}...\n`);
+      } else if (eventType === "running") {
+        process.stdout.write(`  ${chalk.dim("🔄")} 子Agent工作中...\n`);
+      } else if (eventType === "tool_start") {
+        process.stdout.write(`  ${chalk.dim("🔧")} 子Agent调用: ${data.toolName}\n`);
+      } else if (eventType === "completed") {
+        process.stdout.write(`  ${chalk.dim("✅")} 子Agent完成 (${data.turns} 轮, ${data.toolCount || 0} 次工具调用)\n`);
+      } else if (eventType === "failed") {
+        process.stdout.write(`  ${chalk.red("✗")} 子Agent失败: ${(data.error || "").slice(0, 100)}\n`);
+      } else if (eventType === "cancelled") {
+        process.stdout.write(`  ${chalk.yellow("⚠")} 子Agent已取消\n`);
+      } else if (eventType === "timed_out") {
+        process.stdout.write(`  ${chalk.yellow("⏰")} 子Agent超时 (${data.timeoutMs}ms)\n`);
+      }
+    }
+  }) : null;
+
+  // 子 agent 事件回调（用于 executeDelegate 内部转发事件）
+  const onSubagentEvent = (runId, eventType, data) => {
+    // 这些事件在 executeDelegate 的 Promise 内部触发
+    // 由于我们在 async generator 中，无法直接 yield
+    // 所以通过 process.stdout 直接输出（简单方案）
+    // TUI 中的渲染通过 SubagentManager 的 onEvent 回调处理
+  };
 
   let sessionId = composite.main?.sessionId || null;
   let parentMessageId = composite.main?.parentMessageId || null;
@@ -447,13 +492,26 @@ export async function* runAgentLoop(userInput, context) {
             }
           }
 
-          yield { type: "tool_start", toolName, toolParams: params };
+          // ── 委托工具特殊处理：yield subagent_spawn 事件 ──
+          if (toolName === "delegate") {
+            const taskDesc = params.task || (params.tasks ? `${params.tasks.length} 个并发子任务` : "未知任务");
+            yield { type: "subagent_spawn", task: taskDesc, params };
+          } else {
+            yield { type: "tool_start", toolName, toolParams: params };
+          }
 
           const toolResult = await executeToolCall(toolName, params, {
             workingDir,
             taskList: composite.taskList || [],
-            shellTimeout
+            shellTimeout,
+            subagentManager,
+            onSubagentEvent
           });
+
+          // ── 委托工具特殊处理：yield subagent_result 事件 ──
+          if (toolName === "delegate") {
+            yield { type: "subagent_result", toolName, toolResult: toolResult.result, text: formatToolResultCompact(toolName, toolResult.result) };
+          }
 
           // ── 钩子: post:tool_execute ──
           if (context.hooks) {
@@ -477,7 +535,10 @@ export async function* runAgentLoop(userInput, context) {
             toolName, toolResult: toolResult.result
           });
 
-          yield { type: "tool_result", toolName, toolResult: toolResult.result, text: resultText };
+          // 非委托工具：yield tool_result；委托工具已在上面 yield subagent_result
+          if (toolName !== "delegate") {
+            yield { type: "tool_result", toolName, toolResult: toolResult.result, text: resultText };
+          }
 
           if (toolName === "todo" && toolResult.result?.action === "update") {
             updateTaskList(composite, toolResult.result.tasks);

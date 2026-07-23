@@ -6,6 +6,7 @@ import {
 } from "../utils/format.js";
 
 const TOOL_BG = chalk.bgRgb(0, 45, 5);
+const SUBAGENT_BG = chalk.bgRgb(40, 0, 60);
 import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
 // ═══════════════════════════════════════════════
@@ -827,6 +828,8 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
     }
 
     case "tool_result": {
+      // delegate 工具已经用 subagent_result 渲染过了
+      if (event.toolName === "delegate") break;
       // 覆盖 tool_start 的 3 行绿色背景块
       process.stdout.write("\x1b[3A\r\x1b[J");
       const W = termWidth();
@@ -845,6 +848,58 @@ function renderAgentEvent(event, mainProvider, auxProvider) {
       flushResponseLines();
       flushResponseRemaining();
       process.stdout.write("\n   " + chalk.red("✗ ") + event.text + "\n\n");
+      break;
+    }
+
+    case "subagent_spawn": {
+      flushResponseLines();
+      flushResponseRemaining();
+      // 紫色背景块：子 Agent 任务
+      const W = termWidth();
+      const fill = " ".repeat(W);
+      const label = `🤖 子Agent: ${(event.task || "").slice(0, 80)}`;
+      const cleanLabel = label.replace(/\x1b\[[0-9;]*m/g, "");
+      const pad = Math.max(0, W - 3 - visualWidth(cleanLabel));
+      process.stdout.write("\n" + SUBAGENT_BG(fill) + "\n");
+      process.stdout.write(SUBAGENT_BG("   " + chalk.bold.white(label) + " ".repeat(pad)) + "\n");
+      process.stdout.write(SUBAGENT_BG(fill) + "\n");
+      break;
+    }
+
+    case "subagent_result": {
+      // 覆盖 subagent_spawn 的 3 行紫色背景块
+      process.stdout.write("\x1b[3A\r\x1b[J");
+      const W = termWidth();
+      const fill = " ".repeat(W);
+      const result = event.toolResult || {};
+      const success = result.success !== false;
+      const icon = success ? chalk.green("✓") : chalk.red("✗");
+      const type = result.type === "delegate_parallel" ? "并行子Agent" : "子Agent";
+      const count = result.count ? ` (${result.completed}/${result.count} 完成)` : "";
+      const label = `${icon} ${type}: ${(result.task || event.task || "").slice(0, 60)}${count}`;
+      const cleanLabel = label.replace(/\x1b\[[0-9;]*m/g, "");
+      const pad = Math.max(0, W - 3 - visualWidth(cleanLabel));
+      process.stdout.write(SUBAGENT_BG(fill) + "\n");
+      process.stdout.write(SUBAGENT_BG("   " + label + " ".repeat(pad)) + "\n");
+
+      // 显示结果摘要
+      const summary = (result.summary || result.result || "").slice(0, 500);
+      if (summary) {
+        const lines = summary.split("\n");
+        for (let line of lines.slice(0, 8)) {
+          line = line.replace(/\t/g, "        ");
+          const clean = line.replace(/\x1b\[[0-9;]*m/g, "");
+          const p = Math.max(0, W - visualWidth(clean));
+          process.stdout.write(SUBAGENT_BG("   " + chalk.gray(line) + " ".repeat(p)) + "\n");
+        }
+        if (lines.length > 8) {
+          const more = `... 还有 ${lines.length - 8} 行`;
+          const p = Math.max(0, W - visualWidth(more));
+          process.stdout.write(SUBAGENT_BG("   " + chalk.dim(more) + " ".repeat(p)) + "\n");
+        }
+      }
+
+      process.stdout.write(SUBAGENT_BG(fill) + "\n\n");
       break;
     }
 
@@ -878,6 +933,8 @@ function toolLabel(toolName, params) {
       return `FILE-WRITE: ${params?.path || "..."}`;
     case "file-search":
       return `SEARCH: ${params?.pattern || "..."}`;
+    case "delegate":
+      return `DELEGATE: ${(params?.task || "").slice(0, 60) || (params?.tasks ? `${params.tasks.length} 个任务` : "...")}`;
     default:
       return `${toolName}`;
   }
@@ -895,6 +952,8 @@ function toolDoneLabel(toolName, result) {
       return prefix + chalk.bold("FILE-WRITE: ") + chalk.gray(result?.message || result?.path || "");
     case "file-search":
       return prefix + chalk.bold("SEARCH: ") + chalk.gray(`${result?.type}: ${result?.pattern}`);
+    case "delegate":
+      return prefix + chalk.bold("DELEGATE: ") + chalk.gray((result?.task || "").slice(0, 60));
     default:
       return prefix + toolName;
   }
@@ -970,6 +1029,16 @@ function renderToolResultLines(toolName, result, useBg) {
           const icon = t.status === "completed" ? chalk.green("✓") :
                        t.status === "in_progress" ? chalk.yellow("▶") : chalk.gray("○");
           out(`     ${icon} ${t.content}`);
+        }
+      }
+      break;
+    }
+    case "delegate": {
+      const summary = result.summary || result.result || "";
+      if (summary) {
+        const lines = String(summary).split("\n");
+        for (const line of lines.slice(0, 10)) {
+          out("   " + chalk.gray(line.slice(0, 120)));
         }
       }
       break;
