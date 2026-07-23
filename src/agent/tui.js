@@ -825,14 +825,14 @@ function showApprovalPrompt(event, bg, W, fill) {
         lines.push(bg(prefix + chalk.bold(keyHint) + " " + options[i].label + " ".repeat(Math.max(0, W - 8 - keyHint.length - options[i].label.length))));
       }
       lines.push(bg("  " + " ".repeat(W - 4)));
-      lines.push(bg("  " + chalk.dim("↑↓ 选择  Enter 确认") + " ".repeat(Math.max(0, W - 2 - visualWidth("↑↓ 选择  Enter 确认")))));
+      lines.push(bg("  " + chalk.dim("^v 选择  Enter 确认") + " ".repeat(Math.max(0, W - 2 - visualWidth("^v 选择  Enter 确认")))));
       lines.push(bg(fill));
-      process.stdout.write("\n" + lines.join("\n") + "\n");
+      process.stdout.write(lines.join("\n") + "\n");
     }
 
     function cleanup(buf) {
-      // 清除渲染的行
-      const totalLines = options.length + 7;
+      // 清除渲染的行：fill + label + warning + blank + options + blank + hint + fill
+      const totalLines = options.length + 5;
       process.stdout.write(`\x1b[${totalLines}A\r\x1b[J`);
       process.stdin.removeListener("data", onData);
     }
@@ -882,7 +882,7 @@ function showApprovalPrompt(event, bg, W, fill) {
     }
 
     function clearAndRender() {
-      const totalLines = options.length + 7;
+      const totalLines = options.length + 5;
       process.stdout.write(`\x1b[${totalLines}A\r\x1b[J`);
       render();
     }
@@ -910,7 +910,7 @@ function showEditCommandPrompt(event) {
         APPROVAL_BG("  " + chalk.dim("Enter 确认执行  Ctrl+C 取消") + " ".repeat(Math.max(0, W - 2 - visualWidth("Enter 确认执行  Ctrl+C 取消")))),
         APPROVAL_BG(fill)
       ];
-      process.stdout.write("\n" + lines.join("\n") + "\n");
+      process.stdout.write(lines.join("\n") + "\n");
     }
 
     function cleanup() {
@@ -985,9 +985,9 @@ function showAskWithOptions(question, options, bg, W, fill) {
         }
       }
       lines.push(bg("  " + " ".repeat(W - 4)));
-      lines.push(bg("  " + chalk.dim("↑↓ 选择  Enter 确认") + " ".repeat(Math.max(0, W - 2 - visualWidth("↑↓ 选择  Enter 确认")))));
+      lines.push(bg("  " + chalk.dim("^v 选择  Enter 确认") + " ".repeat(Math.max(0, W - 2 - visualWidth("^v 选择  Enter 确认")))));
       lines.push(bg(fill));
-      process.stdout.write("\n" + lines.join("\n") + "\n");
+      process.stdout.write(lines.join("\n") + "\n");
     }
 
     const totalLines = items.length + 5;
@@ -1044,7 +1044,7 @@ function showAskFreeInput(question, bg, W, fill) {
         bg("  " + chalk.dim("Enter 确认  Ctrl+C 取消") + " ".repeat(Math.max(0, W - 2 - visualWidth("Enter 确认  Ctrl+C 取消")))),
         bg(fill)
       ];
-      process.stdout.write("\n" + lines.join("\n") + "\n");
+      process.stdout.write(lines.join("\n") + "\n");
     }
 
     function cleanup() {
@@ -1267,6 +1267,26 @@ function toolDoneLabel(toolName, result) {
   }
 }
 
+/** 按视觉宽度拆分字符串，保证每段不超过 maxW 列 */
+function splitByVisualWidth(s, maxW) {
+  if (!s) return [""];
+  const result = [];
+  let current = "";
+  let currentW = 0;
+  for (const ch of s) {
+    const cw = (ch.codePointAt(0) > 127) ? 2 : 1;
+    if (currentW + cw > maxW && current.length > 0) {
+      result.push(current);
+      current = "";
+      currentW = 0;
+    }
+    current += ch;
+    currentW += cw;
+  }
+  if (current) result.push(current);
+  return result.length ? result : [""];
+}
+
 /** 渲染工具结果内容（不含标签，标签已在 tool_result case 中输出）。useBg=true 时每行包裹 TOOL_BG 全宽背景 */
 function renderToolResultLines(toolName, result, useBg) {
   if (!result) return;
@@ -1277,7 +1297,14 @@ function renderToolResultLines(toolName, result, useBg) {
     const padW = Math.max(0, W - visualWidth(clean));
     return TOOL_BG(s + " ".repeat(padW));
   };
-  const out = (s) => process.stdout.write(wrapBg(s) + "\n");
+  // 按视觉宽度拆行长文本，每段独立包裹背景色
+  const outLong = (s) => {
+    const lines = splitByVisualWidth(s, W);
+    for (const line of lines) {
+      process.stdout.write(wrapBg(line) + "\n");
+    }
+  };
+  const out = (s) => outLong(s);
 
   switch (toolName) {
     case "shell": {

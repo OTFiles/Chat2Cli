@@ -178,12 +178,15 @@ function executeShell(params, context) {
   const { command, requires_approval, working_dir } = params;
   if (!command) return { result: { error: "缺少 command 参数" } };
 
-  // 检查是否需要确认
-  if (isDangerous(command) && !requires_approval) {
+  // 审批触发：Agent 主动要求审批 或 命令匹配危险模式
+  if (requires_approval || isDangerous(command)) {
+    const warning = requires_approval
+      ? `Agent 请求审批: ${command}`
+      : `命令可能危险: ${command}`;
     return {
       requiresApproval: true,
       approvalType: "shell",
-      result: { warning: `命令可能危险: ${command}`, needsConfirm: true, command }
+      result: { warning, needsConfirm: true, command }
     };
   }
 

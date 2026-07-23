@@ -33,8 +33,9 @@ const BUILTIN_PROFILES = {
   explorer: {
     tools: ["shell", "file-read", "file-search"],
     allowedShellCommands: [
-      "ls", "find", "grep", "cat", "head", "tail", "wc",
-      "stat", "file", "du", "tree", "locate", "which", "echo"
+      "ls", "find", "grep", "rg", "cat", "head", "tail", "wc",
+      "stat", "file", "du", "tree", "locate", "which", "echo",
+      "fd", "awk", "sed", "cut", "xargs", "dirname", "basename"
     ],
     blockUnlistedCommands: true,
     maxTurns: 10,
@@ -44,9 +45,11 @@ const BUILTIN_PROFILES = {
   builder: {
     tools: ["shell", "file-read", "file-search", "file-write"],
     allowedShellCommands: [
-      "npm", "npx", "node", "python", "python3", "git",
-      "ls", "cat", "grep", "mkdir", "touch", "cp", "mv",
-      "rm", "chmod", "echo", "which", "pwd", "find"
+      "npm", "npx", "yarn", "pnpm", "node", "python", "python3", "pip",
+      "git", "make", "cargo", "go", "ls", "cat", "grep", "rg",
+      "mkdir", "touch", "cp", "mv", "rm", "chmod", "echo",
+      "which", "pwd", "find", "fd", "sed", "awk", "cut",
+      "sort", "uniq", "wc", "head", "tail", "diff", "patch"
     ],
     blockUnlistedCommands: true,
     maxTurns: 15,
