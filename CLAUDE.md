@@ -136,10 +136,118 @@ chat  → build payload → POST /api/chatgpt/chat/completions → SSE stream
 
 `src/agent/tui.js`:
 - `TOOL_BG = bgRgb(0,45,5)` — 工具执行深绿色背景
+- `SUBAGENT_BG = bgRgb(40,0,60)` — 子 Agent 运行紫色背景
+- `APPROVAL_BG = bgRgb(60,50,0)` — 审批提示暗黄色背景
+- `ASK_BG = bgRgb(0,40,50)` — 用户提问暗青色背景
 - `tool_start` — 输出 3 行绿色背景块（空白+标签+空白）
 - `tool_result` — `\x1b[3A` 上跳覆盖 `tool_start` 块，`renderToolResultLines(..., true)` 包裹每行全宽背景
 - Shell 结果 `\t` → 8 空格，避免 `visualWidth` 低估导致背景错位
-- 无 "Agent工作中..." 浮层状态条
+- 交互式审批 UI：`showInteractivePrompt` → `showApprovalPrompt`（A批准/D拒绝/E编辑）或 `showAskPrompt`（选项/自由输入）
+- 子 Agent 进度事件通过 `process.stdout.write` 输出（[Sub]/[..]/[>>]/[OK]/[FAIL]/[TIMEOUT]）
+
+## Agent 架构：子 Agent 系统
+
+`src/agent/` 下的 agent 模式已从 **v1 双 AI（主+辅）** 重构为 **v2 单 AI + 子 Agent 委派**：
+
+### 核心变化
+
+| 维度 | v1 (旧) | v2 (新) |
+|------|---------|---------|
+| AI 实例数 | 2 个（main + aux） | 1 个（main） |
+| 辅助 AI 触发 | 用户手动 `/aux` 命令 | AI 自动 `delegate` 工具 |
+| 工具限制 | aux 固定工具集 | 按 profile 可配置 |
+| Shell 安全 | 无 | 白名单 + 危险模式 |
+| 并发 | 不支持 | 最多 3 并发（分批复用） |
+| 超时/取消 | 无 | 有（AbortController） |
+| 审批 | 仅 shell 危险检测 | 审批 + ask 双模式 |
+
+### 关键文件
+
+```
+src/agent/subagents/
+├── config.js       # Profile 配置（~/.chat2cli/subagents.json）
+├── manager.js      # SubagentManager — 生命周期 + 白名单 + 并发
+└── prompts.js      # 子 Agent 系统提示词（含 OS 检测、白名单注入）
+```
+
+### SubagentManager
+
+`src/agent/subagents/manager.js` — `SubagentManager` 类：
+
+- `constructor({ provider, model, workingDir, maxTurns, timeoutMs, onEvent })`
+- `spawnAndWait(task, { profile, tools, maxTurns })` → `{ id, status, result, error }`
+- `spawnParallel(tasks[], concurrency=3)` — 分批并发执行
+- `cancel(runId)` / `cancelAll()` — AbortController 取消
+- `get(runId)` / `list(status?)` / `cleanup(olderThanMs)` — 状态管理
+- `onEvent(runId, eventType, data)` — 事件：spawned/running/tool_start/tool_blocked/tool_result/completed/failed/cancelled/timed_out
+
+子 Agent 内部是多轮工具调用循环（受 profile.maxTurns 限制），复用主 AI provider 和 model。支持 Qwen（consumeQwenStream）、DeepSeek（streamDeltasWithMessageId）、GLM（consumeGlmStream）三种流消费方式。
+
+Braille spinner（`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`）在子 Agent 工作时每 80ms 旋转。
+
+### Profile 配置
+
+`src/agent/subagents/config.js` — 配置文件 `~/.chat2cli/subagents.json`：
+
+- 内置 3 个 profile：`default`（5轮/只读）、`explorer`（10轮/搜索增强）、`builder`（15轮/可写）
+- 每 profile 定义：`tools[]`、`allowedShellCommands[]`、`blockUnlistedCommands`、`maxTurns`、`timeoutMs`、`requireApprovalForWrite`
+- 公开 API：`getProfile()`、`listProfiles()`、`saveProfile()`、`deleteProfile()`、`resetConfig()`、`resolveProfile()`
+
+### Shell 白名单
+
+`SubagentManager.checkShellWhitelist(cmd, profile)` — 两层检查：
+
+1. **危险模式检查**（不可绕过）：`rm -rf`、`git push --force`、`git reset --hard`、`git clean -f/d/x`、`chmod 777`、`dd if=`、`mkfs.*`、`> /dev/*`
+2. **白名单检查**：`extractBaseCommand()` 处理 sudo/env/路径前缀，提取基础命令名，在白名单中放行
+
+### delegate 工具
+
+`src/agent/tools/registry.js` 中的 `executeDelegate()`：
+
+- 单任务：`delegate({ task, profile, tools, max_turns })`
+- 并发：`delegate({ tasks: [{ task, profile }, ...] })` — 调用 `manager.spawnParallel(tasks, 3)`
+- 依赖 `context.subagentManager`（在 agent-loop 中初始化）
+
+## 工具审批 & ask 交互
+
+### 审批流程（agent-loop.js + tui.js）
+
+`runAgentLoop` 中的 Promise 桥接模式：
+
+```
+executeToolCall() → { requiresApproval: true, approvalType: "shell"|"ask" }
+  ↓
+yield { type: "approval_required" | "ask_user", resolve: (decision) => {} }
+  ↓ TUI 渲染交互式 UI
+showInteractivePrompt() → showApprovalPrompt() | showAskPrompt()
+  ↓ 用户选择
+resolve({ approved: true/false, answer?, modifiedParams? })
+  ↓ agent-loop 继续
+重新执行（_approved=true 绕过二次审批）或使用用户回答
+```
+
+### 审批 UI（showApprovalPrompt）
+
+- 暗黄色背景块（`APPROVAL_BG`）
+- 三选项：`[A]` 批准执行 / `[D]` 拒绝 / `[E]` 编辑命令后执行
+- 编辑模式（showEditCommandPrompt）：内联键盘编辑，Enter 确认，Ctrl+C 取消
+- 上下键 + 首字母快捷键导航
+
+### ask UI（showAskPrompt）
+
+- 暗青色背景块（`ASK_BG`）
+- 有选项时：列表选择器（↑↓ 导航 + Enter 确认），含"自定义输入..."选项
+- 无选项时：自由文本输入（showAskFreeInput），Enter 确认
+
+### shell 工具审批触发条件
+
+`executeShell()` 在以下情况返回 `requiresApproval`：
+- `requires_approval: true`（AI 主动标注）或 `isDangerous(command)`（危险模式匹配）
+- `_approved` 标记的存在绕过二次审批（重新执行时使用）
+
+## 已移除的辅助 AI（aux）
+
+旧版 `runAuxCall()`、`buildMessagesForAux()`、`aux-system.js`、`composite.aux` 字段、`/aux` 命令、`auxModel`、aux provider 选择已全部移除。
 
 ## Server 模式（OpenAI 兼容 API）
 
@@ -159,6 +267,11 @@ chat  → build payload → POST /api/chatgpt/chat/completions → SSE stream
 - `providers.qwen.accounts[]` — 多账号凭据（token, email）
 - `apiKeys[]` — 分发的 API Key（可绑定到 DeepSeek 账号）
 - `conversations[]` — 本地对话历史
+- `composites[]` — Agent 复合对话（只含 main 字段，aux 已移除）
+
+子 Agent 配置独立存储在 `~/.chat2cli/subagents.json`：
+- `profiles.default/explorer/builder` — 内置 profile（tools, allowedShellCommands, maxTurns, timeoutMs 等）
+- 支持用户自定义 profile 增删改
 
 ## 技术栈
 

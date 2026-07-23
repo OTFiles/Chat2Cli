@@ -12,11 +12,13 @@
 - **云端会话同步** - 查看/继续/删除 DeepSeek 网页端的会话历史
 - **OpenAI 兼容 API** - 启动 HTTP 服务，提供 `/v1/models` 和 `/v1/chat/completions` 接口
 - **Function Calling** - API 服务支持 OpenAI 兼容的 `tools`/`tool_choice` 工具调用
-- **AI Agent 模式** - 主 AI + 辅助 AI 双账号协作，支持 shell/文件读写/文件搜索/任务清单工具调用
+- **AI Agent 模式** - 智能规划 + 工具调用 + 子 Agent 委派 + 用户交互（审批/提问），支持 7 种工具
 - **API Key 管理** - 生成分发 API Key，支持自定义 Key 值，每个 Key 可绑定到独立账号
 - **模型切换** - 对话中随时切换模型
 - **Markdown 渲染** - 支持标题/代码块/表格/列表等，可通过 `--no-markdown` 关闭
 - **批量管理** - 多选删除本地对话和云端会话
+- **子 Agent 系统** - 可配置 Profile 的独立子 Agent，shell 白名单、超时、并发委托
+- **工具审批 & 用户交互** - 危险命令自动触发审批 UI，AI 可通过 ask 工具向用户提问
 - **扩展系统** - 支持 Provider/工具/命令/钩子/路由/提示词注入，见 `examples/extensions/`
 - **终端 UI** - 用户消息透明白色背景块，工具执行绿色背景块
 - **本地存储** - 数据保存在 `~/.chat2cli/` 目录，纯 JSON 格式
@@ -204,21 +206,49 @@ chat2cli agent --continue <id>
 
 # 删除指定复合对话
 chat2cli agent --delete <id>
+
+# 多选批量删除
+chat2cli agent --batch
 ```
 
-Agent 模式使用**主 AI + 辅助 AI** 双账号协作，能自动使用工具完成编程任务。首次运行时会交互式选择两个 AI 的账号，之后自动记住选择（存储在 `~/.chat2cli/data.json` 的 `agent` 配置中）。每次对话达到 token 上限后自动总结并创建新子对话，无迭代次数限制。
+Agent 模式使用**单个 AI** 自动规划并执行任务，AI 能调用工具、委派子 Agent、向用户提问并接收审批决策。首次运行时交互式选择 AI 账号，之后自动记住。每次对话达到 token 上限后自动总结并开启新会话，无迭代次数限制。
 
 **支持的工具有**:
 
 | 工具 | 功能 | 说明 |
 |------|------|------|
-| `shell` | Shell 命令执行 | 危险操作（rm -rf、git push --force 等）需用户确认；`--timeout` 可配超时 |
+| `shell` | Shell 命令执行 | 危险操作自动触发审批，子 Agent 有独立白名单 |
 | `file-read` | 文件读取 | 支持指定行范围 |
-| `file-write` | 文件写入 | mode=create 创建新文件 / mode=replace 替换内容 |
-| `file-search` | 文件搜索 | type=content 搜索文件内容 / type=filename 搜索文件名 |
-| `todo` | 任务清单管理 | 每次对话自动发送，确保 AI 记住任务进度 |
+| `file-write` | 文件写入 | mode=create 创建 / mode=replace 替换 |
+| `file-search` | 文件搜索 | type=content（grep）或 type=filename（glob） |
+| `todo` | 任务清单管理 | AI 自动维护进度 |
+| `delegate` | **子 Agent 委派** | 将独立子任务委派给受 profile 约束的子 Agent 执行 |
+| `ask` | **向用户提问** | 暂停 Agent 循环，收集用户输入后恢复 |
 
-工具执行时以深绿色背景块展示调用标签和返回结果，Shell 输出自动将 tab 转为空格确保排版一致。
+#### 子 Agent 系统
+
+主 AI 通过 `delegate` 工具将独立子任务委派给子 Agent。子 Agent 是独立的 AI 实例，受 **profile** 配置约束：
+
+| Profile | 工具 | 特点 | 使用场景 |
+|---------|------|------|----------|
+| `default` | shell/文件只读 | 基础白名单，5 轮，120s 超时 | 简单检查 |
+| `explorer` | shell/文件只读 | 搜索增强（rg, fd, tree），10 轮 | 代码探索 |
+| `builder` | shell/文件读写 | 构建命令（npm, git, cargo），15 轮，5min 超时 | 构建/修改 |
+
+子 Agent 的 shell 命令受**白名单 + 危险模式检查**双重保护。可自定义 profile（配置文件 `~/.chat2cli/subagents.json`）。
+
+详见 [子 Agent 文档](docs/subagents.md)。
+
+#### 工具审批
+
+危险 shell 操作（rm -rf、git push --force 等）自动触发审批 UI：
+- **A** — 批准执行  |  **D** — 拒绝  |  **E** — 编辑命令后执行
+
+AI 也可主动标注 `requires_approval:true` 请求审批。
+
+#### 用户交互
+
+AI 通过 `ask` 工具向用户提问（端口号、方案选择等），支持选项列表或自由文本输入，Agent 循环暂停等待回复。
 
 **TUI 内置命令**:
 
@@ -227,8 +257,7 @@ Agent 模式使用**主 AI + 辅助 AI** 双账号协作，能自动使用工具
 | `/exit` | 退出 Agent |
 | `/clear` | 清屏 |
 | `/todo` | 查看当前任务清单 |
-| `/context` | 查看当前复合对话上下文（主/辅 AI、消息数） |
-| `/aux <任务>` | 将简单子任务委托给辅助 AI 执行 |
+| `/context` | 查看当前上下文（AI、消息数） |
 | `/models` | 列出可用模型 |
 | `/model <名>` | 切换模型 |
 | `/switch` | 列出历史复合对话 |
@@ -239,12 +268,12 @@ Agent 模式使用**主 AI + 辅助 AI** 双账号协作，能自动使用工具
 
 | 按键 | 功能 |
 |------|------|
-| `Ctrl+C` | 中断当前 Agent 循环，进入人工指导模式 |
+| `Ctrl+C` | 中断当前 Agent 循环 |
 | `↑↓` | 历史输入导航 |
 | `Ctrl+A/E` | 行首/行尾 |
 | `Ctrl+K/U` | 删除到行尾/行首 |
 
-**复合对话**：Agent 模式将一次完整的项目协作包装为"复合对话"，底层维护多个远程会话（主 AI + 辅助 AI），用户只需选择复合对话即可恢复整个项目上下文，无需手动管理底层的远程会话 ID。
+**复合对话**：Agent 模式将一次完整的项目协作包装为"复合对话"，底层维护远程会话，用户只需选择复合对话即可恢复整个项目上下文。
 
 ## 支持的模型
 
@@ -329,12 +358,15 @@ cli/
 │   │   └── agent.js              # Agent 命令入口
 │   ├── agent/
 │   │   ├── agent-loop.js         # Agent 循环编排
-│   │   ├── tui.js                # Agent TUI
+│   │   ├── tui.js                # Agent TUI（含审批/提问 UI）
 │   │   ├── prompts/
-│   │   │   ├── main-system.js    # 主 AI 系统提示词
-│   │   │   └── aux-system.js     # 辅助 AI 系统提示词
+│   │   │   └── main-system.js    # 主 AI 系统提示词
 │   │   ├── tools/
-│   │   │   └── registry.js       # 工具注册 + 执行
+│   │   │   └── registry.js       # 工具注册 + 执行（delegate/ask）
+│   │   ├── subagents/
+│   │   │   ├── config.js         # 子 Agent Profile 配置
+│   │   │   ├── manager.js        # 子 Agent 生命周期管理
+│   │   │   └── prompts.js        # 子 Agent 系统提示词
 │   │   └── storage/
 │   │       └── composite.js      # 复合对话存储
 │   ├── extensions/
