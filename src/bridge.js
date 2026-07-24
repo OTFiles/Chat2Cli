@@ -387,7 +387,7 @@ export function buildOpenAiPrompt({ messages, tools, toolChoice }) {
 
 /** 匹配自闭合和带体的 <invoke> 标签 */
 const INVOKE_PATTERN = /<invoke\b([^>]*?)(?:\/>|>([\s\S]*?)<\/invoke>)/gi;
-const ALL_ATTR_PATTERN = /([a-z0-9_.:-]+)\s*=\s*("[^"]*"|'[^']*')/gi;
+const ALL_ATTR_PATTERN = /([a-z0-9_.:-]+)\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gi;
 
 /** 解码 XML 实体（不 trim，用于属性值） */
 function decodeXmlText(text) {
@@ -419,17 +419,182 @@ function parseJsonObject(text) {
   } catch { return null; }
 }
 
-/** 从 XML 属性字符串中提取所有 key="value" / key='value' 对，value 尝试 JSON 解析 */
+/**
+ * 从 XML 属性字符串中提取所有 key="value" / key='value' 对。
+ * 使用状态机解析，智能处理 AI 常见错误：属性值内嵌套的引号
+ * （例如 command="echo "hello"" → command 正确解析为 echo "hello"）
+ */
 function parseAllAttributes(attrs) {
+  const s = toStringSafe(attrs).trim();
+  const len = s.length;
   const result = {};
-  for (const match of toStringSafe(attrs).matchAll(ALL_ATTR_PATTERN)) {
-    const key = match[1].trim();
-    if (!key || Object.hasOwn(result, key)) continue;
-    const unquoted = match[2].slice(1, -1);
-    const text = decodeXmlText(unquoted);
-    try { result[key] = JSON.parse(text); } catch { result[key] = text; }
+
+  // 快速路径：无嵌套引号时用原正则，性能更好
+  if (!hasNestedQuotes(s)) {
+    for (const match of s.matchAll(ALL_ATTR_PATTERN)) {
+      const key = match[1].trim();
+      if (!key || Object.hasOwn(result, key)) continue;
+      const unquoted = match[2].slice(1, -1);
+      const text = decodeXmlText(unquoted);
+      try { result[key] = JSON.parse(text); } catch { result[key] = text; }
+    }
+    return result;
   }
+
+  // 慢速路径：状态机解析，容忍值内嵌套引号
+  return parseAttributesWithNestedQuotes(s);
+}
+
+/**
+ * 探测属性字符串是否含嵌套引号。
+ * 策略：用简易状态机追踪引号状态，当在引号值内遇到同种引号时，
+ * 调用 wouldCloseAttribute 判断是否为真正的闭合。如果不是闭合，则是嵌套引号。
+ */
+function hasNestedQuotes(s) {
+  let inDq = false, inSq = false;
+  const len = s.length;
+  for (let i = 0; i < len; i++) {
+    const ch = s[i];
+    if (ch === '\\' && i + 1 < len) { i++; continue; }
+    if (ch === '"') {
+      if (!inSq) {
+        if (inDq && !wouldCloseAttribute(s, i, len)) return true;
+        inDq = !inDq;
+      }
+    } else if (ch === "'") {
+      if (!inDq) {
+        if (inSq && !wouldCloseAttribute(s, i, len)) return true;
+        inSq = !inSq;
+      }
+    }
+  }
+  return false;
+}
+
+/** 从 f 位置开始跳过空白，返回第一个非空白字符位置，-1 表达到末尾 */
+function peekNextNonWs(s, from) {
+  for (let j = from; j < s.length; j++) {
+    if (!/\s/.test(s[j])) return j;
+  }
+  return -1;
+}
+
+/**
+ * 状态机属性解析器，容忍双引号值内嵌套的双引号。
+ * 判断"是否为真正的闭合引号的规则：
+ *   " 后紧跟字母/数字（无空白）→ 值内嵌套引号
+ *   " 后紧跟空白，且空白后是字母/数字 → 值内嵌套引号（如 echo "hello" world）
+ *   " 后紧跟空白，且空白后是字母，再往后看是否有 = → 真正的闭合（下一个属性）
+ *   " 后紧跟 /> 或 > → 真正的闭合
+ *   " 后紧跟空白，且空白后是 /> 或 > → 真正的闭合
+ */
+function parseAttributesWithNestedQuotes(s) {
+  const result = {};
+  const len = s.length;
+  let i = 0;
+
+  while (i < len) {
+    // 跳过空白
+    while (i < len && /\s/.test(s[i])) i++;
+    if (i >= len) break;
+
+    // 解析 key
+    const keyStart = i;
+    while (i < len && /[a-z0-9_.:-]/i.test(s[i])) i++;
+    const key = s.slice(keyStart, i).trim();
+    if (!key) break;
+
+    // 跳过 = 和空白
+    while (i < len && /\s/.test(s[i])) i++;
+    if (i >= len || s[i] !== '=') break;
+    i++;
+    while (i < len && /\s/.test(s[i])) i++;
+
+    if (i >= len) break;
+    const quote = s[i];
+    let value;
+
+    if (quote === '"' || quote === "'") {
+      i++; // 跳过开始引号
+      value = '';
+      while (i < len) {
+        // 转义字符
+        if (s[i] === '\\' && i + 1 < len) {
+          value += s[i + 1];
+          i += 2;
+          continue;
+        }
+
+        if (s[i] === quote) {
+          // 探测：这是真正的闭合引号还是值内嵌套？
+          if (wouldCloseAttribute(s, i, len)) {
+            i++; // 真正的闭合
+            break;
+          }
+          // 值内嵌套引号，保留
+          value += s[i++];
+        } else {
+          value += s[i++];
+        }
+      }
+    } else {
+      // 无引号值
+      const vStart = i;
+      while (i < len && !/\s/.test(s[i]) && s[i] !== '/' && s[i] !== '>') i++;
+      value = s.slice(vStart, i);
+    }
+
+    if (Object.hasOwn(result, key)) continue;
+    const decoded = decodeXmlText(value);
+    try { result[key] = JSON.parse(decoded); } catch { result[key] = decoded; }
+  }
+
   return result;
+}
+
+/**
+ * 判断 s[pos] 上的引号字符是否是属性的闭合引号。
+ * 规则：引号后紧跟或跳过空白后出现以下模式之一即为闭合：
+ *   1. /> 或 >（标签结束）
+ *   2. [a-zA-Z]（下一个属性名）→ 进一步检查：如果后续在遇到下一个引号前能找到 = 号
+ *   3. 到达字符串末尾
+ * 如果后续先遇到同种引号（没有 = 号），说明当前引号是值内嵌套。
+ */
+function wouldCloseAttribute(s, pos, len) {
+  if (pos + 1 >= len) return true; // 末尾 → 闭合
+
+  const quote = s[pos];
+
+  // 跳过空白
+  let peek = pos + 1;
+  while (peek < len && /\s/.test(s[peek])) peek++;
+
+  if (peek >= len) return true; // 只有尾随空白 → 闭合
+
+  const nextCh = s[peek];
+
+  // /> 或 > → 闭合
+  if (nextCh === '/' || nextCh === '>') return true;
+
+  // 同种引号紧跟 → 值内嵌套（如 "" 空字符串场景，或相邻嵌套）
+  if (nextCh === quote) return false;
+
+  // 字母开头 → 可能是下一个属性名，也可能只是值内的英文内容
+  if (/[a-zA-Z]/.test(nextCh)) {
+    // 向前扫描：在遇到下一个同种引号之前，如果找到 = 号则是真闭合
+    // 如果先遇到同种引号（没有中间的 =），则是值内嵌套
+    for (let j = peek; j < len; j++) {
+      if (s[j] === '\\' && j + 1 < len) { j++; continue; }
+      if (s[j] === '/' || s[j] === '>') return false; // 标签结束前无 =，值内
+      if (s[j] === quote) return false; // 遇到同种引号 → 当前引号是值内嵌套
+      if (s[j] === '=') return true;    // 确认是下一个属性名
+    }
+    // 扫描完也没找到 = 或引号，保守当作闭合
+    return true;
+  }
+
+  // 数字或其他字符 → 值内嵌套（如 echo "hello" 中的 "）
+  return false;
 }
 
 function buildParsedToolCall(name, argumentsText) {

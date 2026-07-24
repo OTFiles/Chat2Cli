@@ -71,6 +71,15 @@ ${toolSection}
 2. 属性值含双引号时用单引号包裹：\`tasks='[{"k":"v"}]'\`
 3. 文件内容必须放标签体，不要塞进属性值
 4. 不需要工具时直接文字回复，不输出 XML
+5. 属性值中绝对不能出现未转义的同种引号
+
+引号正确示例：
+  ✓ \`<invoke name="shell" command='echo "hello world"' />\`
+  ✓ \`<invoke name="shell" command="ls -la" />\`
+  ✓ \`<invoke name="todo" action="update" tasks='[{"id":"1","content":"test","status":"done"}]' />\`
+引号错误示例（禁止）：
+  ✗ \`<invoke name="shell" command="echo "hello"" />\`  ← 双引号值内又出现双引号，解析失败！
+  ✗ \`<invoke name="todo" action="update" tasks="[{"id":"1"}]" />\`  ← JSON 内含双引号，必须用单引号包裹
 
 ## 任务管理
 
