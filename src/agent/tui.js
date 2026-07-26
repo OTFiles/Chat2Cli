@@ -2,7 +2,7 @@ import chalk from "chalk";
 import { runAgentLoop } from "./agent-loop.js";
 import {
   printUserMsg, printThinkingLabel, BOX, termWidth,
-  USER_MSG_BG, visualWidth
+  USER_MSG_BG, visualWidth, copyToClipboard
 } from "../utils/format.js";
 
 const TOOL_BG = chalk.bgRgb(0, 45, 5);
@@ -704,6 +704,46 @@ export async function agentTui(context) {
         process.stdout.write(`   ${chalk.gray("消息数")}: ${msgs.length}\n`);
         process.stdout.write(`   ${chalk.gray("AI")}: ${mainProvider.label} (session: ${composite.main.sessionId ? "已创建" : "未创建"})\n\n`);
         break;
+
+      case "/copy": {
+        printUserMsg(input);
+        const allMsgs = composite.messages || [];
+        const aiMsgs = [];
+        for (let i = 0; i < allMsgs.length; i++) {
+          if (allMsgs[i].role === "assistant") aiMsgs.push({ index: i, msg: allMsgs[i] });
+        }
+        if (aiMsgs.length === 0) {
+          process.stdout.write("   " + chalk.gray("没有 AI 回复可供复制\n\n"));
+          break;
+        }
+        const arg = parts.slice(1).join(" ").trim();
+        if (arg === "all") {
+          const allText = aiMsgs.map((m, i) => `--- AI 回复 #${i + 1} ---\n${m.msg.content}`).join("\n\n");
+          if (copyToClipboard(allText)) {
+            process.stdout.write("   " + chalk.green("✓ ") + `已复制 ${aiMsgs.length} 条 AI 回复到剪贴板\n\n`);
+          } else {
+            process.stdout.write("   " + chalk.red("✗ ") + "剪贴板不可用\n\n");
+          }
+          break;
+        }
+        const num = parseInt(arg, 10);
+        if (!isNaN(num) && num >= 1 && num <= aiMsgs.length) {
+          if (copyToClipboard(aiMsgs[num - 1].msg.content)) {
+            process.stdout.write("   " + chalk.green("✓ ") + `已复制 AI 回复 #${num} (${aiMsgs[num - 1].msg.content.length} 字符) 到剪贴板\n\n`);
+          } else {
+            process.stdout.write("   " + chalk.red("✗ ") + "剪贴板不可用\n\n");
+          }
+          break;
+        }
+        // 无参数或无效：列表
+        process.stdout.write("   " + chalk.bold("AI 回复列表:\n"));
+        for (let i = 0; i < aiMsgs.length; i++) {
+          const preview = (aiMsgs[i].msg.content || "").replace(/\n/g, " ").trim().slice(0, 60);
+          process.stdout.write(`     ${chalk.cyan(String(i + 1))}  ${preview}${(aiMsgs[i].msg.content || "").length > 60 ? "..." : ""}\n`);
+        }
+        process.stdout.write(chalk.gray("   输入 /copy <序号> 复制  或  /copy all 复制全部\n\n"));
+        break;
+      }
 
       default:
         printUserMsg(input);
@@ -1443,6 +1483,7 @@ function printAgentHelp(extTuiCommands) {
     /exit          退出
     /todo          查看任务清单
     /context       查看当前对话上下文
+    /copy [n|all]  复制 AI 回复到剪贴板
 
   扩展命令:
 ${extLines}

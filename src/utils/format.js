@@ -194,6 +194,7 @@ export function printHelp() {
   process.stdout.write("  " + chalk.cyan("/models") + "  列出可用模型\n");
   process.stdout.write("  " + chalk.cyan("/config") + "  查看/修改聊天参数 (thinking, search, keep on|off)\n");
   process.stdout.write("  " + chalk.cyan("/help") + "    显示此帮助\n");
+  process.stdout.write("  " + chalk.cyan("/copy") + "    [n|all] 复制 AI 回复到剪贴板\n");
   process.stdout.write("\n");
 }
 

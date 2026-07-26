@@ -8,7 +8,7 @@ import {
   printSuccess, printError, printInfo,
   printChatHeader,
   printUserMsg, printThinkingLabel, accountLabel,
-  termWidth
+  termWidth, copyToClipboard
 } from "../utils/format.js";
 import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
 
@@ -1166,6 +1166,52 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
         } else {
           process.stdout.write("   " + chalk.red("✗ ") + `无效序号: ${num}  使用 /switch 查看列表\n\n`);
         }
+        redrawFooter();
+        continue;
+      }
+      // ── /copy: 复制 AI 回复 ──
+      if (input === "/copy" || input.startsWith("/copy ")) {
+        const aiMsgs = [];
+        for (let i = 0; i < messages.length; i++) {
+          if (messages[i].role === "assistant") aiMsgs.push({ index: i, msg: messages[i] });
+        }
+        if (aiMsgs.length === 0) {
+          printUserMsg(input);
+          process.stdout.write("   " + chalk.gray("没有 AI 回复可供复制\n\n"));
+          redrawFooter();
+          continue;
+        }
+        const arg = input.slice(6).trim();
+        if (arg === "all") {
+          const allText = aiMsgs.map((m, i) => `--- AI 回复 #${i + 1} ---\n${m.msg.content}`).join("\n\n");
+          printUserMsg(input);
+          if (copyToClipboard(allText)) {
+            process.stdout.write("   " + chalk.green("✓ ") + `已复制 ${aiMsgs.length} 条 AI 回复到剪贴板\n\n`);
+          } else {
+            process.stdout.write("   " + chalk.red("✗ ") + "剪贴板不可用\n\n");
+          }
+          redrawFooter();
+          continue;
+        }
+        const num = parseInt(arg, 10);
+        if (!isNaN(num) && num >= 1 && num <= aiMsgs.length) {
+          printUserMsg(input);
+          if (copyToClipboard(aiMsgs[num - 1].msg.content)) {
+            process.stdout.write("   " + chalk.green("✓ ") + `已复制 AI 回复 #${num} (${aiMsgs[num - 1].msg.content.length} 字符) 到剪贴板\n\n`);
+          } else {
+            process.stdout.write("   " + chalk.red("✗ ") + "剪贴板不可用\n\n");
+          }
+          redrawFooter();
+          continue;
+        }
+        // 无参数或无效编号：列出可选回复
+        printUserMsg(input);
+        process.stdout.write("   " + chalk.bold("AI 回复列表:\n"));
+        for (let i = 0; i < aiMsgs.length; i++) {
+          const preview = aiMsgs[i].msg.content.replace(/\n/g, " ").trim().slice(0, 60);
+          process.stdout.write(`     ${chalk.cyan(String(i + 1))}  ${preview}${aiMsgs[i].msg.content.length > 60 ? "..." : ""}\n`);
+        }
+        process.stdout.write(chalk.gray("   输入 /copy <序号> 复制指定回复  或  /copy all 复制全部\n\n"));
         redrawFooter();
         continue;
       }
