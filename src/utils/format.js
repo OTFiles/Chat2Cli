@@ -38,8 +38,51 @@ function charWidth(ch) {
 
 // ── Visual width helper ──
 
-function visualWidth(s) {
-  const clean = s.replace(/\x1b\[[0-9;]*m/g, "");
+/** 剥离 ANSI 转义序列（CSI SGR、OSC 超链接、APC 等），返回纯净文本 */
+function stripAnsi(s) {
+  let result = "";
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === "\x1b") {
+      const next = s[i + 1];
+      if (next === "[") {
+        // CSI: ESC [ ... (0x40-0x7e)
+        let j = i + 2;
+        while (j < s.length && s.charCodeAt(j) < 0x40) j++;
+        if (j < s.length) j++; // skip terminator
+        i = j;
+        continue;
+      }
+      if (next === "]") {
+        // OSC: ESC ] ... BEL or ST (ESC \)
+        let j = i + 2;
+        while (j < s.length) {
+          if (s[j] === "\x07") { j++; break; }
+          if (s[j] === "\x1b" && s[j + 1] === "\\") { j += 2; break; }
+          j++;
+        }
+        i = j;
+        continue;
+      }
+      if (next === "_" || next === "P" || next === "^") {
+        // APC / DCS / PM: ESC _/P/^ ... ST (ESC \)
+        let j = i + 2;
+        while (j < s.length) {
+          if (s[j] === "\x1b" && s[j + 1] === "\\") { j += 2; break; }
+          j++;
+        }
+        i = j;
+        continue;
+      }
+    }
+    result += s[i];
+    i++;
+  }
+  return result;
+}
+
+export function visualWidth(s) {
+  const clean = stripAnsi(s);
   let w = 0;
   for (const ch of clean) w += charWidth(ch);
   return w;
@@ -183,20 +226,76 @@ export function printFooter() {
   process.stdout.write("   " + chalk.dim("输入 /help 查看帮助") + "\n");  // 帮助提示
 }
 
+// ── Background helpers ──
+
+/**
+ * 单行文本应用背景色并填充到指定宽度。
+ * @param {string} text - 文本内容（可含 ANSI 码）
+ * @param {number} width - 目标宽度
+ * @param {function} bgFn - 背景色函数（如 chalk.bgRgb(...)）
+ * @param {number} indent - 左侧缩进（视觉宽度）
+ */
+export function bgLine(text, width, bgFn, indent = 0) {
+  const vw = visualWidth(text);
+  const pad = Math.max(0, width - indent - vw);
+  return bgFn(" ".repeat(indent) + text + " ".repeat(pad));
+}
+
+/**
+ * 多行文本包裹背景块（上下各一行空行，中间为内容行）。
+ * 自动按宽度折行，每行独立应用背景色。
+ * @param {string} text - 文本内容
+ * @param {number} width - 终端宽度
+ * @param {function} bgFn - 背景色函数
+ * @param {number} indent - 左侧缩进（视觉宽度）
+ * @returns {string[]} 渲染行数组
+ */
+export function bgBlock(text, width, bgFn, indent = 0) {
+  const fill = " ".repeat(width);
+  const result = [bgFn(fill)];
+  // 按换行分段，每段按视觉宽度折行
+  const paragraphs = text.split("\n");
+  const maxVis = Math.max(1, width - indent);
+  for (const para of paragraphs) {
+    for (const line of wrapByVisualWidth(para, maxVis)) {
+      result.push(bgLine(line, width, bgFn, indent));
+    }
+  }
+  result.push(bgFn(fill));
+  return result;
+}
+
+/**
+ * 按视觉宽度拆分字符串为多行（不处理 ANSI 码，调用者应确保 text 纯文本或已剥离 ANSI）。
+ */
+function wrapByVisualWidth(text, maxW) {
+  if (!text) return [""];
+  const lines = [];
+  let cur = "", curW = 0;
+  for (const ch of text) {
+    const cw = charWidth(ch);
+    if (curW + cw > maxW && cur.length > 0) {
+      lines.push(cur);
+      cur = "";
+      curW = 0;
+    }
+    cur += ch;
+    curW += cw;
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [""];
+}
+
 // ── User message ──
 
 export function printUserMsg(text) {
   const W = termWidth();
-  const fill = " ".repeat(W);
-  // prefix: 3空格 + ❯(双列宽) + 1空格 = 视觉宽度 6
-  const prefix = "   " + chalk.green(" ") + " "; // 修改，去除❯作为提醒
-  const prefixVW = 6;
-  const textVW = visualWidth(text);
-  const padding = Math.max(0, W - prefixVW - textVW);
+  const prefix = "   " + chalk.green(" ") + " ";
+  const prefixVW = visualWidth(prefix);
 
-  process.stdout.write("\n" + USER_MSG_BG(fill) + "\n");
-  process.stdout.write(USER_MSG_BG(prefix + text + " ".repeat(padding)) + "\n");
-  process.stdout.write(USER_MSG_BG(fill) + "\n\n");
+  const lines = bgBlock(text, W, USER_MSG_BG, prefixVW);
+  // bgBlock 已经包含上下空行，但首行前需额外换行
+  process.stdout.write("\n" + lines.join("\n") + "\n\n");
 }
 
 // ── Thinking label ──

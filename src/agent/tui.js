@@ -2,12 +2,30 @@ import chalk from "chalk";
 import { runAgentLoop } from "./agent-loop.js";
 import {
   printUserMsg, printThinkingLabel, BOX, termWidth,
-  USER_MSG_BG
+  USER_MSG_BG, visualWidth
 } from "../utils/format.js";
 
 const TOOL_BG = chalk.bgRgb(0, 45, 5);
 const SUBAGENT_BG = chalk.bgRgb(40, 0, 60);
 import { renderMarkdown, resetMarkdownRenderer } from "../utils/markdown.js";
+
+// ── 模块级工具函数 ──
+
+function charWidth(c) {
+  return (c.charCodeAt(0) > 127) ? 2 : 1;
+}
+
+/** 按视觉宽度截断字符串（CJK 计 2 列），避免终端自动换行残留 */
+function truncateByVisualWidth(s, maxW) {
+  let w = 0;
+  const chars = [...s];
+  for (let i = 0; i < chars.length; i++) {
+    const cw = charWidth(chars[i]);
+    if (w + cw > maxW) return chars.slice(0, i).join("");
+    w += cw;
+  }
+  return s;
+}
 
 // ═══════════════════════════════════════════════
 //  Agent TUI — 复用 chat.js 的 raw mode 输入模式
@@ -70,23 +88,6 @@ export async function agentTui(context) {
   let abortController = null;
   // 工作状态（Agent 执行中禁止输入）
   let agentWorking = false;
-
-  function charWidth(c) {
-    return (c.charCodeAt(0) > 127) ? 2 : 1;
-  }
-
-  /** 按视觉宽度截断字符串（CJK 计 2 列），避免终端自动换行残留 */
-  function truncateByVisualWidth(s, maxW) {
-    let w = 0;
-    const chars = [...s];
-    for (let i = 0; i < chars.length; i++) {
-      const cw = charWidth(chars[i]);
-      if (w + cw > maxW) return chars.slice(0, i).join("");
-      w += cw;
-    }
-    return s;
-  }
-
 
   // 输入文本的终端行数
   const PW = 6; // "   ❯ " 视觉宽度（❯ = 双列宽）
@@ -751,10 +752,14 @@ function resetThinkingState() {
 const APPROVAL_BG = chalk.bgRgb(60, 50, 0);   // 暗黄色
 const ASK_BG = chalk.bgRgb(0, 40, 50);         // 暗青色
 
-/** 前缀 + 内容 + 自动补齐空格到终端宽度 W */
+/** 前缀 + 内容 + 自动补齐空格到终端宽度 W，内容过长自动截断 */
 function padBg(bg, prefix, content, W) {
-  const vw = visualWidth(prefix) + visualWidth(content);
-  return bg(prefix + content + " ".repeat(Math.max(0, W - vw)));
+  const prefVW = visualWidth(prefix);
+  const maxContentW = W - prefVW;
+  // 截断过长内容
+  const trimmed = truncateByVisualWidth(content, maxContentW);
+  const contentVW = visualWidth(trimmed);
+  return bg(prefix + trimmed + " ".repeat(Math.max(0, W - prefVW - contentVW)));
 }
 
 /** 满宽空行 */
@@ -764,7 +769,9 @@ function emptyBg(bg, W) {
 
 /** 满宽行（无前缀） */
 function fullBg(bg, content, W) {
-  return padBg(bg, "", content, W);
+  const trimmed = truncateByVisualWidth(content, W);
+  const vw = visualWidth(trimmed);
+  return bg(trimmed + " ".repeat(Math.max(0, W - vw)));
 }
 
 /**
@@ -792,8 +799,11 @@ function showApprovalPrompt(event, bg, W) {
       { key: "E", label: "编辑命令后执行", action: "edit" }
     ];
     let cursor = 0;
-    const toolLabel = `${event.toolName}: ${(event.command || event.params?.command || "").slice(0, W - 20)}`;
-    const warningText = (event.warning || "此操作需要审批");
+    const toolLabel = truncateByVisualWidth(
+      `${event.toolName}: ${(event.command || event.params?.command || "")}`,
+      W - 10
+    );
+    const warningText = truncateByVisualWidth(event.warning || "此操作需要审批", W - 6);
     const hintLine = "^v 选择  Enter 确认";
 
     function render() {
@@ -1089,8 +1099,11 @@ function renderAgentEvent(event, mainProvider) {
       const W = termWidth();
       const fill = " ".repeat(W);
       const label = toolLabel(event.toolName, event.toolParams);
-      const prefix = "   " + chalk.dim(label);
-      const pad = Math.max(0, W - 3 - visualWidth(label));
+      // 截断过长标签使其不超过终端宽度
+      const maxLabelW = W - 3;
+      const trimmed = truncateByVisualWidth(label, maxLabelW);
+      const prefix = "   " + chalk.dim(trimmed);
+      const pad = Math.max(0, W - 3 - visualWidth(trimmed));
       process.stdout.write("\n" + TOOL_BG(fill) + "\n");
       process.stdout.write(TOOL_BG(prefix + " ".repeat(pad)) + "\n");
       process.stdout.write(TOOL_BG(fill) + "\n");
@@ -1105,10 +1118,11 @@ function renderAgentEvent(event, mainProvider) {
       const W = termWidth();
       const fill = " ".repeat(W);
       const doneLabel = toolDoneLabel(event.toolName, event.toolResult);
-      const doneClean = doneLabel.replace(/\x1b\[[0-9;]*m/g, "");
-      const pad = Math.max(0, W - 3 - visualWidth(doneClean));
+      const maxLabelW = W - 3;
+      const trimmedLabel = truncateByVisualWidth(doneLabel, maxLabelW);
+      const pad = Math.max(0, W - 3 - visualWidth(trimmedLabel));
       process.stdout.write(TOOL_BG(fill) + "\n");
-      process.stdout.write(TOOL_BG("   " + doneLabel + " ".repeat(pad)) + "\n");
+      process.stdout.write(TOOL_BG("   " + trimmedLabel + " ".repeat(pad)) + "\n");
       renderToolResultLines(event.toolName, event.toolResult, true);
       process.stdout.write(TOOL_BG(fill) + "\n\n");
       break;
@@ -1127,9 +1141,10 @@ function renderAgentEvent(event, mainProvider) {
       // 紫色背景块：子 Agent 任务
       const W = termWidth();
       const fill = " ".repeat(W);
-      const label = `[Sub] ${(event.task || "").slice(0, 80)}`;
-      const cleanLabel = label.replace(/\x1b\[[0-9;]*m/g, "");
-      const pad = Math.max(0, W - 3 - visualWidth(cleanLabel));
+      const maxTaskW = W - 3;
+      const taskText = truncateByVisualWidth((event.task || "").slice(0, 200), maxTaskW);
+      const label = `[Sub] ${taskText}`;
+      const pad = Math.max(0, W - 3 - visualWidth(label));
       process.stdout.write("\n" + SUBAGENT_BG(fill) + "\n");
       process.stdout.write(SUBAGENT_BG("   " + chalk.bold.white(label) + " ".repeat(pad)) + "\n");
       process.stdout.write(SUBAGENT_BG(fill) + "\n");
@@ -1146,9 +1161,10 @@ function renderAgentEvent(event, mainProvider) {
       const icon = success ? chalk.green("[OK]") : chalk.red("[FAIL]");
       const type = result.type === "delegate_parallel" ? "并行子Agent" : "子Agent";
       const count = result.count ? ` (${result.completed}/${result.count} 完成)` : "";
-      const label = `${icon} ${type}: ${(result.task || event.task || "").slice(0, 60)}${count}`;
-      const cleanLabel = label.replace(/\x1b\[[0-9;]*m/g, "");
-      const pad = Math.max(0, W - 3 - visualWidth(cleanLabel));
+      const maxLabelW = W - 3;
+      const rawLabel = `${icon} ${type}: ${(result.task || event.task || "").slice(0, 120)}${count}`;
+      const label = truncateByVisualWidth(rawLabel, maxLabelW);
+      const pad = Math.max(0, W - 3 - visualWidth(label));
       process.stdout.write(SUBAGENT_BG(fill) + "\n");
       process.stdout.write(SUBAGENT_BG("   " + label + " ".repeat(pad)) + "\n");
 
@@ -1158,13 +1174,13 @@ function renderAgentEvent(event, mainProvider) {
         const lines = summary.split("\n");
         for (let line of lines.slice(0, 8)) {
           line = line.replace(/\t/g, "        ");
-          const clean = line.replace(/\x1b\[[0-9;]*m/g, "");
-          const p = Math.max(0, W - visualWidth(clean));
-          process.stdout.write(SUBAGENT_BG("   " + chalk.gray(line) + " ".repeat(p)) + "\n");
+          const trimmed = truncateByVisualWidth(line, W - 3);
+          const p = Math.max(0, W - 3 - visualWidth(trimmed));
+          process.stdout.write(SUBAGENT_BG("   " + chalk.gray(trimmed) + " ".repeat(p)) + "\n");
         }
         if (lines.length > 8) {
           const more = `... 还有 ${lines.length - 8} 行`;
-          const p = Math.max(0, W - visualWidth(more));
+          const p = Math.max(0, W - 3 - visualWidth(more));
           process.stdout.write(SUBAGENT_BG("   " + chalk.dim(more) + " ".repeat(p)) + "\n");
         }
       }
@@ -1254,8 +1270,7 @@ function renderToolResultLines(toolName, result, useBg) {
   const W = termWidth();
   const wrapBg = (s) => {
     if (!useBg) return s;
-    const clean = s.replace(/\x1b\[[0-9;]*m/g, "");
-    const padW = Math.max(0, W - visualWidth(clean));
+    const padW = Math.max(0, W - visualWidth(s));
     return TOOL_BG(s + " ".repeat(padW));
   };
   // 按视觉宽度拆行长文本，每段独立包裹背景色
@@ -1349,124 +1364,17 @@ function renderToolResultLines(toolName, result, useBg) {
 
 function renderToolResult(toolName, result) {
   if (!result) return;
-  // echo 时仍用旧格式
-  switch (toolName) {
-    case "shell":
-      renderShellResult(result);
-      break;
-    case "file-read":
-      renderFileReadResult(result);
-      break;
-    case "file-write":
-      renderFileWriteResult(result);
-      break;
-    case "file-search":
-      renderFileSearchResult(result);
-      break;
-    case "todo":
-      renderTodoResult(result);
-      break;
-    default:
-      process.stdout.write("   " + chalk.green("✓") + " " + chalk.gray(JSON.stringify(result).slice(0, 120)) + "\n\n");
-  }
+  // 回显历史时使用带背景的渲染
+  const W = termWidth();
+  const fill = " ".repeat(W);
+  const doneLabel = toolDoneLabel(toolName, result);
+  const pad = Math.max(0, W - 3 - visualWidth(doneLabel));
+  process.stdout.write(TOOL_BG(fill) + "\n");
+  process.stdout.write(TOOL_BG("   " + doneLabel + " ".repeat(pad)) + "\n");
+  renderToolResultLines(toolName, result, true);
+  process.stdout.write(TOOL_BG(fill) + "\n\n");
 }
 
-/** Shell 结果：✓ SHELL: cmd + 直接输出 */
-function renderShellResult(result) {
-  const stdout = result.stdout || "";
-  const stderr = result.stderr || "";
-  const output = stderr || stdout || "(无输出)";
-
-  process.stdout.write("   " + toolDoneLabel("shell", result) + "\n");
-  if (output) {
-    const lines = output.split("\n");
-    for (const line of lines) {
-      process.stdout.write("   " + (stderr ? chalk.red(line) : chalk.white(line)) + "\n");
-    }
-  }
-  if (result.error && !stderr) {
-    process.stdout.write("   " + chalk.red(result.error.slice(0, 200)) + "\n");
-  }
-}
-
-/** 文件读取：只显示路径+行范围 */
-function renderFileReadResult(result) {
-  if (!result.success) {
-    process.stdout.write("   " + chalk.red("✗ FILE-READ: ") + chalk.gray(result.error || "读取失败") + "\n");
-    return;
-  }
-  process.stdout.write("   " + toolDoneLabel("file-read", result) +
-    "  " + chalk.dim(`(行 ${result.offset || 0}-${(result.offset || 0) + (result.lines || 0)} / 共 ${result.totalLines || "?"} 行)`) + "\n");
-}
-
-/** 文件写入 */
-function renderFileWriteResult(result) {
-  if (!result.success) {
-    process.stdout.write("   " + chalk.red("✗ FILE-WRITE: ") + chalk.gray(result.error || "写入失败") + "\n");
-    return;
-  }
-  process.stdout.write("   " + toolDoneLabel("file-write", result) + "\n");
-}
-
-/** 文件搜索 */
-function renderFileSearchResult(result) {
-  if (!result.success && result.error) {
-    process.stdout.write("   " + chalk.red("✗ SEARCH: ") + chalk.gray(result.error) + "\n");
-    return;
-  }
-  process.stdout.write("   " + toolDoneLabel("file-search", result) +
-    "  " + chalk.dim(`(${result.count || 0} 个结果${result.truncated ? "，已截断" : ""})`) + "\n");
-  if (result.type === "filename" && result.files) {
-    for (const f of result.files.slice(0, 10)) {
-      process.stdout.write(chalk.gray("   │ ") + f + "\n");
-    }
-    if (result.files.length > 10) {
-      process.stdout.write(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.files.length - 10} 个`) + "\n");
-    }
-  }
-  if (result.type === "content" && result.matches) {
-    for (const m of result.matches.slice(0, 10)) {
-      process.stdout.write(chalk.gray(`   │ ${m.file}:${m.line}`) + "  " + m.text.slice(0, 120) + "\n");
-    }
-    if (result.matches.length > 10) {
-      process.stdout.write(chalk.gray("   │ ") + chalk.dim(`… 还有 ${result.matches.length - 10} 个`) + "\n");
-    }
-  }
-}
-
-/** 任务清单：显示完整列表 */
-function renderTodoResult(result) {
-  if (result.action === "list") {
-    const tasks = result.tasks || [];
-    if (!tasks.length) {
-      process.stdout.write("   " + chalk.gray("任务清单为空") + "\n\n");
-    } else {
-      process.stdout.write("   " + chalk.bold("TODO:") + "\n");
-      for (const t of tasks) {
-        const icon = t.status === "completed" ? chalk.green("✓") :
-                     t.status === "in_progress" ? chalk.yellow("▶") : chalk.gray("○");
-        process.stdout.write(`     ${icon} ${t.content}\n`);
-      }
-      process.stdout.write("\n");
-    }
-    return;
-  }
-
-  if (result.action === "update") {
-    process.stdout.write("   " + chalk.green("✓") + chalk.bold(" TODO") +
-      "  " + chalk.gray(result.message || "") + "\n");
-    const tasks = result.tasks || [];
-    for (const t of tasks) {
-      const icon = t.status === "completed" ? chalk.green("✓") :
-                   t.status === "in_progress" ? chalk.yellow("▶") : chalk.gray("○");
-      process.stdout.write(`     ${icon} ${t.content}\n`);
-    }
-    process.stdout.write("\n");
-    return;
-  }
-
-  process.stdout.write("\n");
-}
 
 // ═══════════════════════════════════════════════
 //  Agent Header — CHAT2CLI logo + agent 信息
@@ -1518,35 +1426,6 @@ function printAgentHeader({ mainLabel, mainModel, projectName, workingDir }) {
 
   // Bottom border
   process.stdout.write(chalk.cyan(BOX.bl + BOX.h.repeat(inner) + BOX.br) + "\n\n");
-}
-
-function visualWidth(s) {
-  let w = 0;
-  // strip ANSI
-  const stripped = s.replace(/\x1b\[[0-9;]*m/g, "");
-  for (const ch of stripped) {
-    const cp = ch.codePointAt(0);
-    if (cp == null) continue;
-    if (
-      (cp >= 0x1100 && cp <= 0x115f) ||
-      (cp >= 0x2329 && cp <= 0x232a) ||
-      (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
-      (cp >= 0xac00 && cp <= 0xd7a3) ||
-      (cp >= 0xf900 && cp <= 0xfaff) ||
-      (cp >= 0xfe10 && cp <= 0xfe19) ||
-      (cp >= 0xfe30 && cp <= 0xfe6f) ||
-      (cp >= 0xff01 && cp <= 0xff60) ||
-      (cp >= 0xffe0 && cp <= 0xffe6) ||
-      (cp >= 0x1f300 && cp <= 0x1f64f) ||
-      (cp >= 0x1f680 && cp <= 0x1f6ff) ||
-      (cp >= 0x2600 && cp <= 0x26ff)
-    ) {
-      w += 2;
-    } else {
-      w += 1;
-    }
-  }
-  return w;
 }
 
 // ── 帮助 ──
