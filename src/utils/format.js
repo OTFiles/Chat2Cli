@@ -1,4 +1,29 @@
 import chalk from "chalk";
+import { execSync } from "child_process";
+
+// ── Clipboard ──
+
+/** 尝试将文本复制到系统剪贴板。支持 termux-clipboard-set / pbcopy / xclip / wl-copy */
+export function copyToClipboard(text) {
+  try {
+    if (process.env.TERMUX_VERSION) {
+      execSync("termux-clipboard-set", { input: text, stdio: ["pipe", "ignore", "ignore"] });
+      return true;
+    }
+    if (process.platform === "darwin") {
+      execSync("pbcopy", { input: text, stdio: ["pipe", "ignore", "ignore"] });
+      return true;
+    }
+    if (process.env.WAYLAND_DISPLAY) {
+      execSync("wl-copy", { input: text, stdio: ["pipe", "ignore", "ignore"] });
+      return true;
+    }
+    execSync("xclip -selection clipboard", { input: text, stdio: ["pipe", "ignore", "ignore"] });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ── 用户消息背景色：透明白色 ──
 export const USER_MSG_BG = chalk.bgRgb(40, 40, 40);
