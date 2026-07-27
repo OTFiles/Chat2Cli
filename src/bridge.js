@@ -120,20 +120,33 @@ export function createQwenDeltaDecoder() {
         // 跳过元数据事件
         if (obj["response.created"]) return [];
 
+        // 提取 response_id 作为 messageId（供续聊 parentMessageId 使用）
+        const rid = obj?.response?.created?.response_id || obj?.response_id;
+
         // 严格对齐 Qwen2API：只处理 choices[0].delta，且必须有 phase
         const delta = obj?.choices?.[0]?.delta;
-        if (!delta) return [];
+        if (!delta) {
+          if (rid) return [{ kind: "__messageId", text: rid }];
+          return [];
+        }
 
         const phase = delta.phase || "";
         const content = delta.content;
 
-        // 无 phase 或 phase 非 think/answer → 丢弃
-        if (!content || (phase !== "think" && phase !== "answer")) return [];
-
-        if (phase === "think") {
-          return [{ kind: "thinking", text: content }];
+        // 无 phase 或 phase 非 think/answer → 丢弃（但仍提取 messageId）
+        if (!content || (phase !== "think" && phase !== "answer")) {
+          if (rid) return [{ kind: "__messageId", text: rid }];
+          return [];
         }
-        return [{ kind: "response", text: content }];
+
+        const result = [];
+        if (rid) result.push({ kind: "__messageId", text: rid });
+        if (phase === "think") {
+          result.push({ kind: "thinking", text: content });
+        } else {
+          result.push({ kind: "response", text: content });
+        }
+        return result;
       } catch {
         return [];
       }

@@ -30,7 +30,7 @@ async function selectProvider(role, preferredProvider) {
 
   // 列出所有可用账号
   const accounts = [];
-  for (const provider of [getProvider("deepseek"), getProvider("qwen")]) {
+  for (const provider of [getProvider("deepseek"), getProvider("qwen"), getProvider("glm")]) {
     if (!provider || !provider.isAuthenticated()) continue;
     const accs = provider.listAccounts ? provider.listAccounts() : [provider.getAccountInfo()];
     for (const acc of accs) {
@@ -123,7 +123,10 @@ export async function runAgent(opts = {}) {
   const agentPrefs = getAgentConfig();
 
   // 选取 AI
-  const main = await selectProvider("AI", agentPrefs.mainProvider);
+  // 只有 --continue 明确继续旧会话时才用偏好自动匹配账号，
+  // 其他情况（--new / 交互菜单）强制弹出账号选择，确保「先选账号再选模型」
+  const forcePickAccount = !opts.continue;
+  const main = await selectProvider("AI", forcePickAccount ? undefined : agentPrefs.mainProvider);
   const mainProvider = getProvider(main.providerName);
   if (!mainProvider) {
     printError(`未找到 AI provider: ${main.providerName}`);

@@ -202,13 +202,15 @@ function buildContinuationPrompt(thinking, toolResults) {
 
 function createAgentStreamConsumer(provider, resp) {
   if (provider.name === "qwen") {
-    // 渐进式流消费（Qwen 不需要 messageId，会话由 chat_id 维护）
+    // 渐进式流消费（同时捕获 response_id 作为 messageId 供续聊使用）
     const pending = [];
     let done = false;
     let error = null;
+    let messageId = null;
 
     // 在后台消费流，边收边填充 pending
     const consumePromise = consumeQwenStream(resp.body, (delta) => {
+      if (delta.kind === "__messageId") { messageId = messageId || delta.text; return; }
       pending.push({ type: delta.kind, text: delta.text });
     }).then(() => { done = true; }).catch((err) => { error = err; done = true; });
 
@@ -226,7 +228,7 @@ function createAgentStreamConsumer(provider, resp) {
         if (error) throw error;
         await consumePromise;
       },
-      get messageId() { return null; }
+      get messageId() { return messageId; }
     };
   }
   const stream = streamDeltasWithMessageId(resp);
