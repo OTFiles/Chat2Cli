@@ -1029,10 +1029,13 @@ export class QwenProvider extends BaseProvider {
     const upstreamModel = resolveUpstreamModelId(model, realModels);
     const fullPrompt = options.prompt || buildPromptFromMessages(messages);
     // 续聊时只发最后一条用户消息（不打包历史）
+    // 但如果外部显式传入了 prompt（如 agent 工具结果），原样使用，不被续聊逻辑覆盖
     const isContinuation = !!(options.sessionId && options.parentMessageId);
-    const prompt = isContinuation
-      ? (messages.filter(m => m.role === "user").pop()?.content || fullPrompt)
-      : fullPrompt;
+    const prompt = options.prompt
+      ? fullPrompt
+      : isContinuation
+        ? (messages.filter(m => m.role === "user").pop()?.content || fullPrompt)
+        : fullPrompt;
 
     // 图片/视频生成走专用路径
     if (chatType === "t2i" || chatType === "t2v" || chatType === "image_edit") {
