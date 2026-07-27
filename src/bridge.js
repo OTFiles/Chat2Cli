@@ -385,8 +385,80 @@ export function buildOpenAiPrompt({ messages, tools, toolChoice }) {
 
 // ── 工具调用解析（invoke 格式）──
 
-/** 匹配自闭合和带体的 <invoke> 标签 */
-const INVOKE_PATTERN = /<invoke\b([^>]*?)(?:\/>|>([\s\S]*?)<\/invoke>)/gi;
+/**
+ * 引号感知的 <invoke> 标签查找器。
+ * 追踪 " 和 ' 引号状态，只在引号外才识别 /> 和 > 为标签终止符。
+ * 解决命令中包含 > (重定向), < (heredoc) 等 shell 运算符导致解析失败的问题。
+ */
+function findInvokeTags(text) {
+  const results = [];
+  const lower = text.toLowerCase();
+  let pos = 0;
+
+  while (pos < text.length) {
+    const invokeStart = lower.indexOf("<invoke", pos);
+    if (invokeStart === -1) break;
+
+    // 确保 invoke 后是词边界，避免误匹配 <invoke-xxx>
+    const afterName = invokeStart + 7;
+    if (afterName < text.length && /[a-z0-9_-]/i.test(text[afterName])) {
+      pos = afterName;
+      continue;
+    }
+
+    // 追踪引号状态扫描属性区，找到真正的标签终止位置
+    let i = afterName;
+    let inDq = false, inSq = false;
+    let selfClose = false;
+    let bodyStart = -1;
+    let attrEnd = -1;
+
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === "\\" && i + 1 < text.length) { i += 2; continue; }
+      if (ch === '"' && !inSq) { inDq = !inDq; i++; continue; }
+      if (ch === "'" && !inDq) { inSq = !inSq; i++; continue; }
+      // 只在引号外识别标签终止
+      if (!inDq && !inSq) {
+        if (ch === "/" && text[i + 1] === ">") { attrEnd = i; selfClose = true; i += 2; break; }
+        if (ch === ">") { attrEnd = i; bodyStart = i + 1; i++; break; }
+      }
+      i++;
+    }
+
+    if (attrEnd === -1) { pos = afterName; continue; }
+
+    const attrs = text.slice(afterName, attrEnd).trim();
+    let inner = "";
+    let endPos = i;
+
+    if (!selfClose) {
+      const closeIdx = lower.indexOf("</invoke>", bodyStart);
+      if (closeIdx === -1) { pos = afterName; continue; }
+      inner = text.slice(bodyStart, closeIdx);
+      endPos = closeIdx + "</invoke>".length;
+    }
+
+    results.push({ attrs, inner, start: invokeStart, end: endPos });
+    pos = endPos;
+  }
+
+  return results;
+}
+
+/** 引号感知的 /> 查找：在引号外找到第一个 /> 的位置，找不到返回 -1 */
+function findSelfCloseIdx(text) {
+  let inDq = false, inSq = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\" && i + 1 < text.length) { i++; continue; }
+    if (ch === '"' && !inSq) { inDq = !inDq; continue; }
+    if (ch === "'" && !inDq) { inSq = !inSq; continue; }
+    if (!inDq && !inSq && ch === "/" && text[i + 1] === ">") return i;
+  }
+  return -1;
+}
+
 const ALL_ATTR_PATTERN = /([a-z0-9_.:-]+)\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gi;
 
 /** 解码 XML 实体（不 trim，用于属性值） */
@@ -626,10 +698,8 @@ function parseMarkupBlock(attrs, inner) {
 function parseMarkupToolCalls(text) {
   const output = [];
   const source = toStringSafe(text).trim();
-  for (const match of source.matchAll(INVOKE_PATTERN)) {
-    const attrs = toStringSafe(match[1]).trim();
-    const inner = toStringSafe(match[2] ?? "");
-    const parsed = parseMarkupBlock(attrs, inner);
+  for (const tag of findInvokeTags(source)) {
+    const parsed = parseMarkupBlock(tag.attrs, tag.inner);
     if (parsed) output.push(parsed);
   }
   return output;
@@ -662,9 +732,25 @@ function isInsideCodeFence(state, prefix) {
 
 function findPartialToolTagStart(text) {
   const lastIndex = text.lastIndexOf("<");
-  if (lastIndex < 0 || text.slice(lastIndex).includes(">")) return -1;
-  const tail = text.slice(lastIndex).toLowerCase();
-  return TOOL_CAPTURE_PAIRS.some(({ open }) => open.startsWith(tail)) ? lastIndex : -1;
+  if (lastIndex < 0) return -1;
+  // 使用引号感知检查：从最后一个 < 开始，跳过多行引号内容后是否还有 >
+  const tail = text.slice(lastIndex);
+  if (hasUnquotedGt(tail)) return -1;
+  const tailLower = tail.toLowerCase();
+  return TOOL_CAPTURE_PAIRS.some(({ open }) => open.startsWith(tailLower)) ? lastIndex : -1;
+}
+
+/** 引号感知检查字符串中是否存在引号外的 >（即标签已闭合） */
+function hasUnquotedGt(text) {
+  let inDq = false, inSq = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\" && i + 1 < text.length) { i++; continue; }
+    if (ch === '"' && !inSq) { inDq = !inDq; continue; }
+    if (ch === "'" && !inDq) { inSq = !inSq; continue; }
+    if (!inDq && !inSq && ch === ">") return true;
+  }
+  return false;
 }
 
 function findToolSegmentStart(state, text) {
@@ -706,11 +792,10 @@ function consumeCapturedToolBlock(captured, allowedToolNames) {
     const openIndex = lower.indexOf(pair.open);
     if (openIndex < 0) continue;
 
-    // 自闭合检测：/> 出现在下一个 < 之前
+    // 引号感知的自闭合检测：/> 可能在引号外（真终止）或引号内（值的一部分）
     const afterOpen = captured.slice(openIndex + pair.open.length);
-    const nextTagIdx = afterOpen.indexOf("<");
-    const scIdx = afterOpen.indexOf("/>");
-    if (scIdx >= 0 && (nextTagIdx < 0 || scIdx < nextTagIdx)) {
+    const scIdx = findSelfCloseIdx(afterOpen);
+    if (scIdx >= 0) {
       const closeEnd = openIndex + pair.open.length + scIdx + 2;
       return {
         ready: true,
