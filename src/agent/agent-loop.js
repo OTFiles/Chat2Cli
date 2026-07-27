@@ -435,6 +435,7 @@ export async function* runAgentLoop(userInput, context) {
       if (consumer.messageId) {
         parentMessageId = consumer.messageId;
         composite.main.parentMessageId = consumer.messageId;
+        saveComposite(composite);
       }
 
       const parsedCalls = parseToolCallsFromText(responseText);

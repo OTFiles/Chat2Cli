@@ -117,11 +117,14 @@ export function createQwenDeltaDecoder() {
       try {
         const obj = JSON.parse(jsonStr);
 
-        // 跳过元数据事件
-        if (obj["response.created"]) return [];
-
-        // 提取 response_id 作为 messageId（供续聊 parentMessageId 使用）
+        // 先提取 response_id（必须在跳过 response.created 之前，否则会漏掉）
         const rid = obj?.response?.created?.response_id || obj?.response_id;
+
+        // 跳过元数据事件（但已提取 rid）
+        if (obj["response.created"]) {
+          if (rid) return [{ kind: "__messageId", text: rid }];
+          return [];
+        }
 
         // 严格对齐 Qwen2API：只处理 choices[0].delta，且必须有 phase
         const delta = obj?.choices?.[0]?.delta;
@@ -1143,6 +1146,7 @@ export async function streamQwenOpenAiResponse({ bodyStream, model, response, to
   };
 
   await consumeQwenStream(bodyStream, (delta) => {
+    if (delta.kind === "__messageId") return;  // 元数据，不转发给 HTTP 客户端
     if (delta.kind === "thinking") {
       writeSse(buildChunkPayload(completionId, model, { reasoning_content: delta.text }));
       return;
@@ -1184,6 +1188,7 @@ export async function collectQwenOpenAiResponse({ bodyStream, model, toolNames =
   let rawContent = "";
 
   await consumeQwenStream(bodyStream, (delta) => {
+    if (delta.kind === "__messageId") return;  // 元数据，不混入 content
     if (delta.kind === "thinking") {
       reasoningContent += delta.text;
     } else {
