@@ -813,11 +813,13 @@ function consumeCapturedToolBlock(captured, allowedToolNames) {
     const scIdx = findSelfCloseIdx(afterOpen);
     if (scIdx >= 0) {
       const closeEnd = openIndex + pair.open.length + scIdx + 2;
+      // 自闭合标签不需要 </invoke>，清除 suffix 中孤立的闭合标签
+      const cleanSuffix = captured.slice(closeEnd).replace(/<\/invoke>/gi, "");
       return {
         ready: true,
         prefix: captured.slice(0, openIndex),
         calls: parseToolCallsFromText(captured.slice(openIndex, closeEnd), allowedToolNames),
-        suffix: captured.slice(closeEnd)
+        suffix: cleanSuffix
       };
     }
 
@@ -825,11 +827,13 @@ function consumeCapturedToolBlock(captured, allowedToolNames) {
     if (closeIndex < openIndex) return { ready: false };
 
     const closeEnd = closeIndex + pair.close.length;
+    // 非自闭合：</invoke> 已被消费，suffix 中如有残留 </invoke> 也是孤立的
+    const cleanSuffix = captured.slice(closeEnd).replace(/<\/invoke>/gi, "");
     return {
       ready: true,
       prefix: captured.slice(0, openIndex),
       calls: parseToolCallsFromText(captured.slice(openIndex, closeEnd), allowedToolNames),
-      suffix: captured.slice(closeEnd)
+      suffix: cleanSuffix
     };
   }
 
