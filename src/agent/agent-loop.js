@@ -344,6 +344,9 @@ export async function* runAgentLoop(userInput, context) {
   appendMessage(composite, { role: "user", content: userInput, source: "user" });
   composite._turnStartIdx = composite.messages.length;
 
+  // 提取已知工具名列表，用于过滤 AI 回复中的假阳性 <invoke> 匹配
+  const knownToolNames = TOOL_DEFINITIONS.map(t => t.function?.name || t.name).filter(Boolean);
+
   while (true) {
     if (signal?.aborted) {
       yield { type: "done", text: "已中断" };
@@ -404,7 +407,7 @@ export async function* runAgentLoop(userInput, context) {
       }
 
       const consumer = createAgentStreamConsumer(mainProvider, resp);
-      const toolSieve = createToolSieve([]);
+      const toolSieve = createToolSieve(knownToolNames);
       let thinkingText = "";
       let responseText = "";
 
@@ -438,7 +441,7 @@ export async function* runAgentLoop(userInput, context) {
         saveComposite(composite);
       }
 
-      const parsedCalls = parseToolCallsFromText(responseText);
+      const parsedCalls = parseToolCallsFromText(responseText, knownToolNames);
 
       // 检查是否有工具调用结果需要继续（即使 responseText 为空）
       // 场景：纯 reasoning 模型可能仅输出 thinking，但仍需处理之前的工具结果

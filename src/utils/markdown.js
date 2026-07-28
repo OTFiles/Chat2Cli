@@ -30,10 +30,10 @@ function renderInline(text) {
   text = text.replace(/`([^`]+)`/g, (_, c) => chalk.cyan(c));
   // [链接](url)
   text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, (_, c) => chalk.blue.underline(c));
-  // *斜体* → 深蓝
-  text = text.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, (_, c) => chalk.rgb(0, 100, 180)(c));
+  // *斜体* → 深蓝（排除含 \ [](){} 的代码/正则片段，避免误吞）
+  text = text.replace(/(?<!\*)\*(?!\s)([^*\n\\\[\]\(\){}]+?)(?<!\s)\*(?!\*)/g, (_, c) => chalk.rgb(0, 100, 180)(c));
   // _斜体_ → 深蓝
-  text = text.replace(/(?<!_)_([^_\n]+)_(?!_)/g, (_, c) => chalk.rgb(0, 100, 180)(c));
+  text = text.replace(/(?<!_)_(?!\s)([^_\n\\\[\]\(\){}]+?)(?<!\s)_(?!_)/g, (_, c) => chalk.rgb(0, 100, 180)(c));
   return text;
 }
 
