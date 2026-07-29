@@ -55,6 +55,19 @@ const BUILTIN_PROFILES = {
     maxTurns: 15,
     timeoutMs: 300000,
     requireApprovalForWrite: false
+  },
+  search: {
+    // 纯联网搜索子 agent：不注入任何工具/工具调用格式，
+    // 靠 provider 原生 web 搜索能力（enableSearch + search 模型变体）完成，
+    // 单轮返回固定格式结果。tools 必须为空，避免注入 <invoke> 格式。
+    tools: [],
+    allowedShellCommands: [],
+    blockUnlistedCommands: true,
+    maxTurns: 1,
+    timeoutMs: 120000,
+    requireApprovalForWrite: true,
+    promptMode: "search",
+    enableSearch: true
   }
 };
 
@@ -71,7 +84,10 @@ function normalizeProfile(config) {
     blockUnlistedCommands: config?.blockUnlistedCommands ?? base.blockUnlistedCommands,
     maxTurns: typeof config?.maxTurns === "number" ? config.maxTurns : base.maxTurns,
     timeoutMs: typeof config?.timeoutMs === "number" ? config.timeoutMs : base.timeoutMs,
-    requireApprovalForWrite: config?.requireApprovalForWrite ?? base.requireApprovalForWrite
+    requireApprovalForWrite: config?.requireApprovalForWrite ?? base.requireApprovalForWrite,
+    // search 专用字段（仅 search profile 使用）
+    promptMode: typeof config?.promptMode === "string" ? config.promptMode : undefined,
+    enableSearch: config?.enableSearch === true
   };
 }
 
@@ -81,7 +97,8 @@ function readConfig() {
       profiles: {
         default: { ...BUILTIN_PROFILES.default },
         explorer: { ...BUILTIN_PROFILES.explorer },
-        builder: { ...BUILTIN_PROFILES.builder }
+        builder: { ...BUILTIN_PROFILES.builder },
+        search: { ...BUILTIN_PROFILES.search }
       }
     };
     writeFileSync(CONFIG_FILE, JSON.stringify(defaults, null, 2));
@@ -166,7 +183,8 @@ export function resetConfig() {
     profiles: {
       default: { ...BUILTIN_PROFILES.default },
       explorer: { ...BUILTIN_PROFILES.explorer },
-      builder: { ...BUILTIN_PROFILES.builder }
+      builder: { ...BUILTIN_PROFILES.builder },
+      search: { ...BUILTIN_PROFILES.search }
     }
   };
   writeConfig(defaults);

@@ -1063,7 +1063,19 @@ async function chatLoop(provider, messages, currentModel, accountId, sessionId =
       if (input.startsWith("/model ")) {
         const m = input.slice(7).trim();
         printUserMsg(input);
-        if (provider.getModels().some((mod) => mod.id === m)) {
+        let models = provider.getModels();
+        // 不在当前列表则先拉取刷新，再校验
+        if (!models.some((mod) => mod.id === m) && typeof provider.refreshModels === "function") {
+          try {
+            await provider.refreshModels();
+            models = provider.getModels();
+          } catch (e) {
+            process.stdout.write("   " + chalk.red("✗ ") + `模型刷新失败: ${e.message}\n\n`);
+            redrawFooter();
+            continue;
+          }
+        }
+        if (models.some((mod) => mod.id === m)) {
           currentModel = m;
           setModelForProvider(provider.name, m);  // 持久化到配置文件
           process.stdout.write("   " + chalk.green("✓ ") + `模型已切换为: ${chalk.bold(m)}` + chalk.gray("  (已保存)") + "\n\n");

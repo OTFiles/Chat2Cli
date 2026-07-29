@@ -66,9 +66,10 @@ export const TOOL_DEFINITIONS = [
     description: "将子任务委托给子 Agent 执行。子 Agent 是独立的 AI，受 profile 配置约束（工具列表、shell 白名单等）。适合独立、不需上下文的探索/搜索/检查类任务。可并发委托多个子任务。",
     parameters: {
       task: { type: "string", required: true, description: "子任务描述（要具体、可验证）" },
-      tasks: { type: "array", required: false, description: "并发委托多个子任务时的任务数组 [{ task: '描述', profile: 'explorer' }]" },
-      profile: { type: "string", required: false, description: "子 Agent 配置名称。内置: default（默认，只读）、explorer（搜索增强）、builder（可写）。可自定义。" },
+      tasks: { type: "array", required: false, description: "并发委托多个子任务时的任务数组 [{ task: '描述', profile: 'explorer', model: '可指定模型' }]" },
+      profile: { type: "string", required: false, description: "子 Agent 配置名称。内置: default（默认，只读）、explorer（搜索增强）、builder（可写）、search（联网搜索，不调工具）。可自定义。" },
       tools: { type: "array", required: false, description: "覆盖 profile 中的工具列表" },
+      model: { type: "string", required: false, description: "覆盖子 Agent 使用的模型。search profile 未指定时自动用主模型的 search 变体（联网搜索）。" },
       max_turns: { type: "number", required: false, description: "覆盖 profile 中的最大工具调用轮次" }
     }
   },
@@ -451,7 +452,7 @@ async function executeDelegate(params, context) {
     return { result: { error: "子 Agent 管理器未初始化，无法委托任务" } };
   }
 
-  const { task, tasks, profile, tools, max_turns } = params;
+  const { task, tasks, profile, tools, model, max_turns } = params;
   const profileName = profile || "default";
 
   // 并发委托模式
@@ -460,6 +461,7 @@ async function executeDelegate(params, context) {
       task: typeof t === "string" ? t : t.task,
       profile: t.profile || profileName,
       tools: t.tools || tools || undefined,
+      model: t.model || model || undefined,
       maxTurns: t.max_turns || max_turns || undefined
     }));
 
@@ -507,6 +509,7 @@ async function executeDelegate(params, context) {
   const result = await manager.spawnAndWait(task, {
     profile: profileName,
     tools: tools || undefined,
+    model: model || undefined,
     maxTurns: max_turns || undefined
   });
 

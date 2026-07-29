@@ -140,7 +140,13 @@ async function handleChatCompletions(req, res) {
   const model = body.model || getConfig().defaultModel;
 
   // 校验 model 是否属于当前 API Key 绑定的 provider
-  const providerModels = provider.getModels();
+  let providerModels = provider.getModels();
+  if (!providerModels.some((m) => m.id === model)) {
+    // 不在列表则先拉取刷新（qwen 等支持 refreshModels 的 provider）
+    if (typeof provider.refreshModels === "function") {
+      try { await provider.refreshModels(); providerModels = provider.getModels(); } catch {}
+    }
+  }
   if (!providerModels.some((m) => m.id === model)) {
     return sendError(res, 400, `模型 "${model}" 不属于 ${provider.label} 服务商`);
   }

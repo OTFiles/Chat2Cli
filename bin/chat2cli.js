@@ -21,6 +21,7 @@ import { runConfig } from "../src/commands/config.js";
 import { runApiKey } from "../src/commands/apikey.js";
 import { runServe } from "../src/commands/serve.js";
 import { runAgent } from "../src/commands/agent.js";
+import { runModels } from "../src/commands/models.js";
 
 // 初始化 Provider（在扩展加载前，用于冲突检测）
 initProviders();
@@ -54,6 +55,7 @@ ${chalk.bold("快速开始:")}
 ${chalk.bold("更多命令:")}
   ${chalk.cyan("chat2cli history")}       查看对话历史
   ${chalk.cyan("chat2cli config")}        查看/修改配置
+  ${chalk.cyan("chat2cli models")}        列出/刷新模型列表
   `);
 
 program
@@ -260,6 +262,30 @@ ${chalk.dim("快捷键:")}
         batch: opts.batch,
         dir: opts.dir
       });
+    } catch (err) {
+      process.stderr.write(chalk.red("错误: " + err.message + "\n"));
+      process.exit(1);
+    }
+  });
+
+program
+  .command("models [action]")
+  .description("列出或刷新模型列表")
+  .option("-p, --provider <name>", "指定服务商（默认使用配置中的 defaultProvider）")
+  .addHelpText("after", `
+${chalk.dim("用法:")}
+  ${chalk.cyan("chat2cli models")}                列出当前服务商的模型
+  ${chalk.cyan("chat2cli models list")}        同上
+  ${chalk.cyan("chat2cli models refresh")}     强制刷新模型列表（仅 qwen 等支持动态刷新）
+  ${chalk.cyan("chat2cli models -p qwen")}     列出指定服务商的模型
+
+${chalk.dim("说明:")}
+  支持动态刷新的服务商会在登录后自动拉取真实模型列表并持久化。
+  deepseek/glm/openai 使用静态列表，refresh 会给出提示。
+  `)
+  .action(async (action, opts) => {
+    try {
+      await runModels(action || "", opts || {});
     } catch (err) {
       process.stderr.write(chalk.red("错误: " + err.message + "\n"));
       process.exit(1);

@@ -12,7 +12,7 @@
  */
 
 import { createId } from "../../utils/id.js";
-import { buildSubAgentSystemPrompt } from "./prompts.js";
+import { buildSubAgentSystemPrompt, buildSearchSubAgentPrompt } from "./prompts.js";
 import { buildPromptFromMessages, parseToolCallsFromText } from "../../bridge.js";
 import { executeToolCall, TOOL_DEFINITIONS } from "../tools/registry.js";
 import { getExtensionPromptSections } from "../../extensions/index.js";
@@ -136,6 +136,45 @@ function checkShellWhitelist(cmd, profile) {
   return { allowed: true, baseCommand: base };
 }
 
+// ── Search 模型变体推导 ──
+
+/**
+ * 根据主模型推导其 search 变体（联网搜索模型）。
+ * - qwen: model + "-search"（已带 -search/-thinking-search 则原样；-thinking → -thinking-search）
+ * - deepseek: model + "-search"（resolveModelConfig 自动开 search_enabled）
+ * - glm/其它: 不支持原生 web 搜索，原样返回
+ * @param {object} provider
+ * @param {string} model
+ * @returns {string}
+ */
+function resolveSearchModel(provider, model) {
+  if (!model) return model;
+  const name = provider?.name;
+  if (name === "qwen") {
+    if (model.endsWith("-thinking-search") || model.endsWith("-search")) return model;
+    if (model.endsWith("-thinking")) return `${model}-search`;
+    return `${model}-search`;
+  }
+  if (name === "deepseek") {
+    if (model.endsWith("-search")) return model;
+    return `${model}-search`;
+  }
+  // glm / openai 等不支持原生搜索变体
+  return model;
+}
+
+/**
+ * 从 search 子 agent 的响应文本中提取 <search>...</search> 或 <search-failed /> 块。
+ * 容错：若未命中标签，原样返回全文。
+ * @param {string} text
+ * @returns {string}
+ */
+function extractSearchResult(text) {
+  if (!text) return text;
+  const m = text.match(/<search[\s\S]*?<\/search>|<search-failed[^>]*\/>/);
+  return m ? m[0] : text.trim();
+}
+
 // ── 子 agent 运行状态 ──
 
 const RUN_STATES = {
@@ -203,18 +242,26 @@ export class SubagentManager {
    * 生成子 agent 的 messages 数组
    * @param {string} task
    * @param {object} profile - 子 Agent 配置
+   * @param {object} [extra]
+   * @param {boolean} [extra.isSearch] - 是否为 search 模式
    */
-  _buildMessages(task, profile) {
-    const tools = profile.tools || ["shell", "file-read", "file-search"];
+  _buildMessages(task, profile, extra = {}) {
     const extSections = getExtensionPromptSections ? getExtensionPromptSections("aux") : [];
 
-    let systemPrompt = buildSubAgentSystemPrompt({
-      workingDir: this.workingDir,
-      allowedTools: tools,
-      toolDefinitions: TOOL_DEFINITIONS,
-      allowedShellCommands: profile.allowedShellCommands || [],
-      blockUnlistedCommands: profile.blockUnlistedCommands !== false
-    });
+    let systemPrompt;
+    if (extra.isSearch) {
+      // search 模式：专用提示词，不注入任何工具/工具调用格式
+      systemPrompt = buildSearchSubAgentPrompt({ workingDir: this.workingDir });
+    } else {
+      const tools = profile.tools || ["shell", "file-read", "file-search"];
+      systemPrompt = buildSubAgentSystemPrompt({
+        workingDir: this.workingDir,
+        allowedTools: tools,
+        toolDefinitions: TOOL_DEFINITIONS,
+        allowedShellCommands: profile.allowedShellCommands || [],
+        blockUnlistedCommands: profile.blockUnlistedCommands !== false
+      });
+    }
 
     if (extSections.length > 0) {
       systemPrompt += "\n\n" + extSections.join("\n\n");
@@ -242,8 +289,9 @@ export class SubagentManager {
     const allowedTools = profile.tools || ["shell", "file-read", "file-search"];
     const signal = run.abortController?.signal;
     const maxTurns = profile.maxTurns ?? this.defaultMaxTurns;
+    const isSearch = profile.promptMode === "search";
 
-    const messages = this._buildMessages(task, profile);
+    const messages = this._buildMessages(task, profile, { isSearch });
     const toolResults = [];
 
     let sessionId = null;
@@ -271,9 +319,10 @@ export class SubagentManager {
 
       const providerOpts = {
         prompt,
-        model: this.model || undefined,
+        model: (opts.model || (isSearch ? resolveSearchModel(this.provider, this.model) : this.model)) || undefined,
         accountId: this.provider.getDefaultAccount?.()?.id
       };
+      if (isSearch) providerOpts.enableSearch = true;
       if (sessionId) {
         providerOpts.sessionId = sessionId;
         providerOpts.parentMessageId = parentMessageId;
@@ -301,6 +350,14 @@ export class SubagentManager {
         let thinkingText = "";
         let responseText = "";
 
+        // 累加 delta，过滤 __messageId / __sessionId 等元数据（不混入文本）
+        const accumulate = (delta) => {
+          if (!delta || typeof delta.kind !== "string") return;
+          if (delta.kind === "thinking") thinkingText += delta.text;
+          else if (delta.kind === "response") responseText += delta.text;
+          // 其它 kind（__messageId/__sessionId/__tokenExpired 等）忽略
+        };
+
         if (this.provider.name === "qwen") {
           const pending = [];
           let done = false, error = null;
@@ -318,9 +375,7 @@ export class SubagentManager {
               return "[已取消]";
             }
             while (idx < pending.length) {
-              const delta = pending[idx++];
-              if (delta.kind === "thinking") thinkingText += delta.text;
-              else responseText += delta.text;
+              accumulate(pending[idx++]);
             }
             if (done) break;
             await new Promise((r) => setTimeout(r, 10));
@@ -338,8 +393,7 @@ export class SubagentManager {
               run.completedAt = Date.now();
               return "[已取消]";
             }
-            if (delta.kind === "thinking") thinkingText += delta.text;
-            else responseText += delta.text;
+            accumulate(delta);
           }
           if (stream.messageId) {
             parentMessageId = stream.messageId;
@@ -347,9 +401,26 @@ export class SubagentManager {
         } else {
           const { consumeGlmStream } = await import("../../bridge.js");
           await consumeGlmStream(resp.body, (delta) => {
-            if (delta.kind === "thinking") thinkingText += delta.text;
-            else responseText += delta.text;
+            if (signal?.aborted) {
+              this._spinner?.stop("[!] 已取消");
+              this._spinner = null;
+              run.status = RUN_STATES.CANCELLED;
+              run.completedAt = Date.now();
+              return;
+            }
+            accumulate(delta);
           });
+        }
+
+        // search 模式：单轮，不解析工具调用，直接提取搜索结果
+        if (isSearch) {
+          this._spinner?.stop("[OK] 搜索完成");
+          this._spinner = null;
+          run.status = RUN_STATES.COMPLETED;
+          run.result = extractSearchResult(responseText);
+          run.completedAt = Date.now();
+          this._emit(runId, "completed", { result: run.result, turns, toolCount: 0 });
+          return run.result;
         }
 
         // 解析工具调用
@@ -476,6 +547,7 @@ export class SubagentManager {
    * @param {string} [opts.profile="default"] - profile 名称
    * @param {string[]} [opts.tools] - 覆盖 profile 中的工具列表
    * @param {number} [opts.maxTurns] - 覆盖最大轮次
+   * @param {string} [opts.model] - 覆盖使用的模型（search profile 未指定时自动推导 search 变体）
    * @returns {Promise<{ id: string, task: string, status: string, result: string, error?: string }>}
    */
   async spawnAndWait(task, opts = {}) {
@@ -524,7 +596,7 @@ export class SubagentManager {
       run.status = RUN_STATES.RUNNING;
       this._emit(runId, "running", { profile: profileName });
 
-      const result = await this._executeSubAgent(runId, task, { profile });
+      const result = await this._executeSubAgent(runId, task, { profile, model: opts.model });
 
       if (timeoutHandle) clearTimeout(timeoutHandle);
 

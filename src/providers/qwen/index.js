@@ -654,6 +654,15 @@ export class QwenProvider extends BaseProvider {
       return { ...state, providers };
     });
 
+    // 登录成功后主动拉取真实模型列表并持久化，让后续同步 getModels() 能返回真实列表。
+    // 拉取失败不阻断登录，仅 warn。
+    try {
+      await this._fetchModels(token, { force: true });
+      console.error("[Qwen] 登录后已同步模型列表");
+    } catch (e) {
+      console.error(`[Qwen] 登录后同步模型列表失败（不影响登录）: ${e.message}`);
+    }
+
     return account;
   }
 
@@ -804,66 +813,143 @@ export class QwenProvider extends BaseProvider {
   _cachedModels = null;
   _modelsLastFetch = 0;
 
-  async _fetchModels(token) {
+  /**
+   * 从上游拉取真实模型列表并持久化到 store。
+   * 成功返回模型数组；失败抛出带可读原因的错误（不再静默回落兜底列表）。
+   * @param {string} token
+   * @param {{ force?: boolean }} [opts]
+   */
+  async _fetchModels(token, { force = false } = {}) {
     const now = Date.now();
-    if (this._cachedModels && (now - this._modelsLastFetch) < 30 * 60 * 1000) {
+    if (!force && this._cachedModels && (now - this._modelsLastFetch) < 30 * 60 * 1000) {
       return this._cachedModels;
     }
+    if (!token) {
+      throw new Error("未登录 Qwen，无法拉取模型列表");
+    }
+
+    let resp;
     try {
-      const resp = await fetch(`${QWEN_BASE_URL}/api/models`, {
+      resp = await fetch(`${QWEN_BASE_URL}/api/models`, {
         headers: buildHeaders(token),
       });
-      if (resp.ok) {
-        const raw = await resp.json();
-        const list = Array.isArray(raw) ? raw : (raw?.data || raw?.models || []);
-        if (Array.isArray(list) && list.length > 0) {
-          const models = list.map(item => {
-            const id = item.id || item.model || item.name || "";
-            const label = item.display_name || item.displayName || item.name || item.id || "";
-            const chatTypes = item?.info?.meta?.chat_type || [];
-
-            // 生成能力变体后缀模型
-            const variants = [{ id, label }];
-
-            // 从上游元数据判断图片/视频能力
-            const hasImage = chatTypes.includes("t2i");
-            const hasImageEdit = chatTypes.includes("image_edit");
-            const hasVideo = chatTypes.includes("t2v");
-
-            // 兜底：omni 系列模型硬编码支持图片/视频（上游元数据可能缺失）
-            const isOmni = id.toLowerCase().includes("omni");
-            if (hasImage || isOmni) {
-              variants.push({ id: `${id}-image`, label: `${label} (图片生成)` });
-            }
-            if (hasImageEdit || isOmni) {
-              variants.push({ id: `${id}-image-edit`, label: `${label} (图片编辑)` });
-            }
-            if (hasVideo || isOmni) {
-              variants.push({ id: `${id}-video`, label: `${label} (视频生成)` });
-            }
-            // 所有模型都可加 thinking / search
-            variants.push(
-              { id: `${id}-thinking`, label: `${label} (思考)` },
-              { id: `${id}-search`, label: `${label} (搜索)` },
-              { id: `${id}-thinking-search`, label: `${label} (思考+搜索)` },
-            );
-            return variants;
-          }).flat();
-          if (models.length > 0) {
-            this._cachedModels = models;
-            this._modelsLastFetch = now;
-            return models;
-          }
-        }
-      }
     } catch (e) {
-      console.error("[Qwen] Failed to fetch models:", e.message);
+      throw new Error(`拉取 Qwen 模型列表失败（网络错误）：${e.message}`);
     }
-    return QWEN_MODELS;
+
+    if (!resp.ok) {
+      if (resp.status === 401 || resp.status === 403) {
+        const err = new Error("Qwen token 已失效，无法拉取模型列表");
+        err.status = resp.status;
+        err._tokenExpired = true;
+        throw err;
+      }
+      const text = await resp.text().catch(() => "");
+      throw new Error(`拉取 Qwen 模型列表失败 HTTP ${resp.status}: ${text.slice(0, 200)}`);
+    }
+
+    let raw;
+    try {
+      raw = await resp.json();
+    } catch (e) {
+      throw new Error(`拉取 Qwen 模型列表失败：响应非 JSON（${e.message}）`);
+    }
+
+    const list = Array.isArray(raw) ? raw : (raw?.data || raw?.models || []);
+    if (!Array.isArray(list) || list.length === 0) {
+      throw new Error("拉取 Qwen 模型列表失败：上游返回空列表");
+    }
+
+    const models = list.map(item => {
+      const id = item.id || item.model || item.name || "";
+      const label = item.display_name || item.displayName || item.name || item.id || "";
+      const chatTypes = item?.info?.meta?.chat_type || [];
+
+      // 生成能力变体后缀模型
+      const variants = [{ id, label }];
+
+      // 从上游元数据判断图片/视频能力
+      const hasImage = chatTypes.includes("t2i");
+      const hasImageEdit = chatTypes.includes("image_edit");
+      const hasVideo = chatTypes.includes("t2v");
+
+      // 兜底：omni 系列模型硬编码支持图片/视频（上游元数据可能缺失）
+      const isOmni = id.toLowerCase().includes("omni");
+      if (hasImage || isOmni) {
+        variants.push({ id: `${id}-image`, label: `${label} (图片生成)` });
+      }
+      if (hasImageEdit || isOmni) {
+        variants.push({ id: `${id}-image-edit`, label: `${label} (图片编辑)` });
+      }
+      if (hasVideo || isOmni) {
+        variants.push({ id: `${id}-video`, label: `${label} (视频生成)` });
+      }
+      // 所有模型都可加 thinking / search
+      variants.push(
+        { id: `${id}-thinking`, label: `${label} (思考)` },
+        { id: `${id}-search`, label: `${label} (搜索)` },
+        { id: `${id}-thinking-search`, label: `${label} (思考+搜索)` },
+      );
+      return variants;
+    }).flat().filter(m => m && m.id);
+
+    if (models.length === 0) {
+      throw new Error("拉取 Qwen 模型列表失败：解析后为空");
+    }
+
+    this._cachedModels = models;
+    this._modelsLastFetch = now;
+
+    // 持久化到 store，供同步 getModels() 读取
+    updateStore((state) => {
+      const providers = { ...state.providers };
+      providers.qwen = {
+        ...(providers.qwen || {}),
+        models,
+        modelsUpdatedAt: new Date().toISOString(),
+      };
+      return { ...state, providers };
+    });
+
+    return models;
   }
 
+  /**
+   * 公开的模型刷新入口：取默认账号 + 自动续期 + 拉取 + 持久化。
+   * 供 login 后、`/model` 校验、server 校验等场景调用。
+   * 失败时抛错，调用方自行处理（降级到 getModels() 或提示）。
+   */
+  async refreshModels(opts = {}) {
+    const account = this.getDefaultAccount();
+    if (!account) throw new Error("未登录 Qwen，请先运行 chat2cli login");
+    return await this._withAutoRefresh(account, (token) => this._fetchModels(token, opts));
+  }
+
+  /**
+   * 拉取真实模型列表，失败时降级到同步 getModels()（缓存/兜底），不中断对话。
+   * 供 chat / startCompletion / generateImage 使用。
+   */
+  async _getRealModelsOrFallback(account) {
+    try {
+      return await this._fetchModels(account.token);
+    } catch (e) {
+      console.error(`[Qwen] 拉取模型列表失败，降级使用缓存/兜底列表: ${e.message}`);
+      return this.getModels();
+    }
+  }
+
+  /**
+   * 同步获取模型列表（保持 BaseProvider 同步契约）。
+   * 顺序：内存缓存 → store 持久化缓存 → 静态兜底。
+   * 不触发网络；真实列表由 refreshModels()/login() 写入持久化。
+   */
   getModels() {
     if (this._cachedModels) return this._cachedModels;
+    const stored = getStore()?.providers?.qwen?.models;
+    if (Array.isArray(stored) && stored.length > 0) {
+      this._cachedModels = stored;
+      return stored;
+    }
     return QWEN_MODELS;
   }
 
@@ -873,8 +959,10 @@ export class QwenProvider extends BaseProvider {
     const account = this.getAccountInfo(options.accountId);
     if (!account) throw new Error("未登录 Qwen，请先运行 chat2cli login");
 
-    const realModels = await this._fetchModels(account.token);
-    const model = options.model || realModels[0]?.id;
+    const realModels = await this._getRealModelsOrFallback(account);
+    const requestedModel = options.model || realModels[0]?.id;
+    // 若传入模型不在真实列表中（如过时的兜底型号），降级到第一个真实模型，避免上游 400
+    const model = (requestedModel && realModels.some(m => m.id === requestedModel)) ? requestedModel : realModels[0]?.id;
     const chatType = resolveChatType(model);
     const upstreamModel = resolveUpstreamModelId(model, realModels);
 
@@ -1001,8 +1089,10 @@ export class QwenProvider extends BaseProvider {
     const account = this.getAccountInfo(options.accountId);
     if (!account) throw new Error("未登录 Qwen，请先运行 chat2cli login");
 
-    const realModels = await this._fetchModels(account.token);
-    const model = options.model || realModels[0]?.id;
+    const realModels = await this._getRealModelsOrFallback(account);
+    const requestedModel = options.model || realModels[0]?.id;
+    // 若传入模型不在真实列表中（如过时的兜底型号），降级到第一个真实模型，避免上游 400
+    const model = (requestedModel && realModels.some(m => m.id === requestedModel)) ? requestedModel : realModels[0]?.id;
     const chatType = options.chatType || resolveChatType(model);
     const prompt = options.prompt || "";
 
@@ -1023,8 +1113,10 @@ export class QwenProvider extends BaseProvider {
       : this.getDefaultAccount();
     if (!account) throw new Error("未登录 Qwen，请先运行 chat2cli login");
 
-    const realModels = await this._fetchModels(account.token);
-    const model = options.model || realModels[0]?.id;
+    const realModels = await this._getRealModelsOrFallback(account);
+    const requestedModel = options.model || realModels[0]?.id;
+    // 若传入模型不在真实列表中（如过时的兜底型号），降级到第一个真实模型，避免上游 400
+    const model = (requestedModel && realModels.some(m => m.id === requestedModel)) ? requestedModel : realModels[0]?.id;
     const chatType = resolveChatType(model);
     const upstreamModel = resolveUpstreamModelId(model, realModels);
     const fullPrompt = options.prompt || buildPromptFromMessages(messages);
