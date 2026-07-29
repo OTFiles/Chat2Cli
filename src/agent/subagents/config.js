@@ -64,7 +64,7 @@ const BUILTIN_PROFILES = {
     allowedShellCommands: [],
     blockUnlistedCommands: true,
     maxTurns: 1,
-    timeoutMs: 120000,
+    timeoutMs: 180000,
     requireApprovalForWrite: true,
     promptMode: "search",
     enableSearch: true

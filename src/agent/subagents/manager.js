@@ -239,6 +239,34 @@ export class SubagentManager {
   }
 
   /**
+   * abort 时的统一处理：区分超时/取消，并保底返回已积累内容。
+   * - 超时（run.status 已被超时定时器设为 TIMED_OUT）：保持语义，不覆盖为取消
+   * - 真取消（仍处于 RUNNING/PENDING，即 Ctrl+C）：设 CANCELLED 并 emit
+   * - 已积累 responseText 时保底返回（search 模式下提取 <search>），避免丢弃结果
+   * @returns {string|null} 应返回的文本；null 表示非 abort 终态（不应中止）
+   */
+  _handleAbort(run, runId, responseText, isSearch, turns) {
+    if (run.status === RUN_STATES.TIMED_OUT) {
+      this._spinner?.stop(`[TIMEOUT] ${run.error || "超时"}`);
+      this._spinner = null;
+      const t = (responseText || "").trim();
+      if (t) return isSearch ? extractSearchResult(t) : t;
+      return `[超时] ${run.error || "子 agent 超时"}`;
+    }
+    if (run.status === RUN_STATES.RUNNING || run.status === RUN_STATES.PENDING) {
+      this._spinner?.stop("[!] 子Agent已取消");
+      this._spinner = null;
+      run.status = RUN_STATES.CANCELLED;
+      run.completedAt = Date.now();
+      this._emit(runId, "cancelled", { turns });
+      const t = (responseText || "").trim();
+      if (t) return isSearch ? extractSearchResult(t) : t;
+      return "[已取消]";
+    }
+    return null;
+  }
+
+  /**
    * 生成子 agent 的 messages 数组
    * @param {string} task
    * @param {object} profile - 子 Agent 配置
@@ -298,17 +326,19 @@ export class SubagentManager {
     let parentMessageId = null;
     let turns = 0;
 
+    // abort 时的统一处理（转发到实例方法，便于测试与复用）
+    const handleAbort = (responseText) => this._handleAbort(run, runId, responseText, isSearch, turns);
+
     // 启动 spinner
     this._spinner = startSpinner("子Agent工作中...");
 
     while (turns < maxTurns) {
+      let thinkingText = "";
+      let responseText = "";
+
       if (signal?.aborted) {
-        this._spinner?.stop("[!] 子Agent已取消");
-        this._spinner = null;
-        run.status = RUN_STATES.CANCELLED;
-        run.completedAt = Date.now();
-        this._emit(runId, "cancelled", { turns });
-        return "[已取消]";
+        const r = handleAbort(responseText);
+        if (r !== null) return r;
       }
 
       turns++;
@@ -347,8 +377,6 @@ export class SubagentManager {
 
         // 消费流
         const { consumeQwenStream } = await import("../../bridge.js");
-        let thinkingText = "";
-        let responseText = "";
 
         // 累加 delta，过滤 __messageId / __sessionId 等元数据（不混入文本）
         const accumulate = (delta) => {
@@ -368,11 +396,8 @@ export class SubagentManager {
           let idx = 0;
           while (!done || idx < pending.length) {
             if (signal?.aborted) {
-              this._spinner?.stop("[!] 已取消");
-              this._spinner = null;
-              run.status = RUN_STATES.CANCELLED;
-              run.completedAt = Date.now();
-              return "[已取消]";
+              const r = handleAbort(responseText);
+              if (r !== null) return r;
             }
             while (idx < pending.length) {
               accumulate(pending[idx++]);
@@ -387,11 +412,8 @@ export class SubagentManager {
           const stream = streamDeltasWithMessageId(resp);
           for await (const delta of stream.deltas) {
             if (signal?.aborted) {
-              this._spinner?.stop("[!] 已取消");
-              this._spinner = null;
-              run.status = RUN_STATES.CANCELLED;
-              run.completedAt = Date.now();
-              return "[已取消]";
+              const r = handleAbort(responseText);
+              if (r !== null) return r;
             }
             accumulate(delta);
           }
@@ -401,15 +423,14 @@ export class SubagentManager {
         } else {
           const { consumeGlmStream } = await import("../../bridge.js");
           await consumeGlmStream(resp.body, (delta) => {
-            if (signal?.aborted) {
-              this._spinner?.stop("[!] 已取消");
-              this._spinner = null;
-              run.status = RUN_STATES.CANCELLED;
-              run.completedAt = Date.now();
-              return;
-            }
+            // 回调内无法中断流消费；abort 时停止累加，由流结束后的检查统一处理
+            if (signal?.aborted) return;
             accumulate(delta);
           });
+          if (signal?.aborted) {
+            const r = handleAbort(responseText);
+            if (r !== null) return r;
+          }
         }
 
         // search 模式：单轮，不解析工具调用，直接提取搜索结果
@@ -433,11 +454,8 @@ export class SubagentManager {
 
           for (const call of parsedCalls) {
             if (signal?.aborted) {
-              this._spinner?.stop("[!] 已取消");
-              this._spinner = null;
-              run.status = RUN_STATES.CANCELLED;
-              run.completedAt = Date.now();
-              return "[已取消]";
+              const r = handleAbort(responseText);
+              if (r !== null) return r;
             }
 
             const toolName = call.name;
@@ -511,10 +529,8 @@ export class SubagentManager {
         this._spinner = null;
 
         if (signal?.aborted) {
-          run.status = RUN_STATES.CANCELLED;
-          run.completedAt = Date.now();
-          this._emit(runId, "cancelled", { turns });
-          return "[已取消]";
+          const r = handleAbort(responseText);
+          if (r !== null) return r;
         }
 
         run.status = RUN_STATES.FAILED;

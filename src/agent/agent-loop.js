@@ -288,6 +288,12 @@ export async function* runAgentLoop(userInput, context) {
     // TUI 中的渲染通过 SubagentManager 的 onEvent 回调处理
   };
 
+  // ── Ctrl+C 传播：主 agent 中断时立即取消所有在跑的子 agent ──
+  // （主循环 await 子 agent 时卡住，轮询式 abort 检查点无法及时触发，故用事件监听）
+  if (signal && subagentManager) {
+    signal.addEventListener("abort", () => subagentManager.cancelAll(), { once: true });
+  }
+
   let sessionId = composite.main?.sessionId || null;
   let parentMessageId = composite.main?.parentMessageId || null;
 
