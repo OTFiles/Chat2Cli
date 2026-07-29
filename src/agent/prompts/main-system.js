@@ -107,8 +107,14 @@ EOF
   - default: 只读工具，基础 shell 白名单，5 轮
   - explorer: 搜索增强，更多搜索命令，10 轮
   - builder: 包含 file-write，构建类命令，15 轮
+  - search: 联网搜索，不调工具，单轮，自动用主模型的 search 变体
 
-可并发委托多个子任务：
+可用 model 参数为子 Agent 指定模型（同一服务商内，如 qwen3.7-plus-thinking）：
+\`\`\`
+<invoke name="delegate" task="深入分析" profile="explorer" model="qwen3.7-plus-thinking" />
+\`\`\`
+
+可并发委托多个子任务（每个可单独指定 profile/model）：
 \`\`\`
 <invoke name="delegate" tasks='[{"task":"检查 auth.js","profile":"explorer"},{"task":"构建前端"}]' />
 \`\`\`

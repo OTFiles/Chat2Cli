@@ -70,7 +70,11 @@ async function loadWasm() {
 
 let wasm;
 
-export async function solvePowChallenge(challenge) {
+// PoW 求解串行化锁：避免并发调用交错覆盖模块级 writtenLength/WASM 内存
+// 产出错误的 PoW answer。求解很快(ms 级)，串行不影响并发收益(网络 IO 仍并发)
+let powChain = Promise.resolve();
+
+async function _solvePowChallengeImpl(challenge) {
   wasm = await loadWasm();
   const prefix = `${challenge.salt}_${challenge.expire_at ?? challenge.expireAt}_`;
   const stackPointer = wasm.__wbindgen_add_to_stack_pointer(-16);
@@ -100,4 +104,11 @@ export async function solvePowChallenge(challenge) {
   } finally {
     wasm.__wbindgen_add_to_stack_pointer(16);
   }
+}
+
+export function solvePowChallenge(challenge) {
+  const run = powChain.then(() => _solvePowChallengeImpl(challenge));
+  // 链不断：失败不阻塞后续求解
+  powChain = run.catch(() => {});
+  return run;
 }
