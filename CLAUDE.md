@@ -21,6 +21,8 @@ node bin/chat2cli.js chat               # 交互式对话
 node bin/chat2cli.js chat -m "你好"     # 单条消息
 node bin/chat2cli.js history            # 查看对话历史
 node bin/chat2cli.js config             # 查看配置
+node bin/chat2cli.js models             # 列出/刷新模型列表
+node bin/chat2cli.js models refresh -p qwen  # 强制刷新 Qwen 模型列表
 node bin/chat2cli.js apikey create      # 创建 API Key
 node bin/chat2cli.js serve -p 3000      # 启动 OpenAI 兼容 API 服务
 ```
@@ -32,7 +34,7 @@ node bin/chat2cli.js serve -p 3000      # 启动 OpenAI 兼容 API 服务
 ```
 bin/chat2cli.js          CLI 入口（commander 路由 + 全局错误处理）
     ↓
-src/commands/*.js        命令实现（login / chat / history / config / apikey / agent / serve）
+src/commands/*.js        命令实现（login / chat / history / config / apikey / agent / serve / models）
     ↓
 src/extensions/          扩展系统（钩子、自定义工具/命令/路由、提示词注入）
     ↓
@@ -81,8 +83,12 @@ chat  → create session → build body → POST /api/v0/chat/completion → SSE
 
 DeepSeek 返回 text/event-stream，内部 payload 是 JSON，用 `src/utils/sse.js` 解析：
 - `createSseParser` 解析标准 SSE 事件
-- `createDeepseekDeltaDecoder` 从 JSON payload 中提取 `{ kind: "thinking" | "response", text }`
+- `createDeepseekDeltaDecoder` 从 JSON payload 中提取 `{ kind: "thinking" | "response", text }`，并在跳过 `response.created` 前先提取 `response_id`（供 agent-loop 续聊）
 - `bridge.js` 中的 `createThinkingTagger` 在 thinking/response 切换时插入 `<think>` / `</think>` 标签
+
+## `<invoke>` 工具调用解析
+
+`bridge.js` 的 `findInvokeTags` 使用**状态机解析器**（非正则），追踪 `"` 和 `'` 引号状态，只在引号外识别 `/>` 和 `>` 为标签终止符。支持 shell 重定向（`>`、`<`）、heredoc（`<<`）等含特殊字符的命令。流式拦截器 `consumeCapturedToolBlock`/`findPartialToolTagStart` 同理。
 
 ## Qwen Provider 数据流
 
@@ -98,26 +104,35 @@ chat  → create session → build payload → POST /api/v2/chat/completions →
 - `_loginByPassword(email, password)` — 密码 SHA256 哈希后调用登录 API，包含 Version/source/bx-v 等登录专用 headers
 - `createChatSession(token, model)` — 创建 Qwen 会话
 - `buildQwenPayload(chatId, model, prompt)` — 构建聊天请求 payload（含 feature_config）
-- `parseQwenSseData(jsonStr)` — 参照 qwen2API 的 ParseQwenEvent()，全面解析 SSE 响应：
-  - 支持 `choices[0].delta` 中多种 reasoning 字段（reasoning_content, reasoning, reasoning_text, thinking, thoughts）
-  - 支持 `delta.extra` 子对象中的 reasoning
-  - 支持顶层 content/answer/text/delta 和 reasoning_content/reasoning/thinking
-  - 递归解析 `data` 和 `message` 子对象
-  - 返回 `Array<{ kind: "thinking" | "response", text }>`
+- `parseQwenSseData(jsonStr)` — 参照 qwen2API 的 ParseQwenEvent()，全面解析 SSE 响应（详见实现）
+
+### 模型列表拉取与持久化
+
+Qwen 的真实模型列表通过 `GET /api/models` 拉取（响应 `{ data: [...] }`，字段 `id`/`name`/`info.meta.chat_type`）。关键设计：
+
+- `_fetchModels(token, { force })` — 拉取成功后**持久化到 store**（`providers.qwen.models` + `modelsUpdatedAt`）+ 内存缓存；失败**抛出带可读原因的错误**（区分 401/网络/非 JSON/空列表），不再静默回落虚构兜底列表。复用原有解析与能力后缀变体扩展逻辑。
+- `refreshModels({ force })` — 公开入口，取默认账号 + `_withAutoRefresh` 自动续期 + 拉取 + 持久化。供 login 后、`/model` 校验、server 校验调用。
+- `getModels()` — **同步**（保持 `BaseProvider` 同步契约），顺序：内存缓存 → store 持久化 → 静态兜底 `QWEN_MODELS`。不触发网络。
+- `_getRealModelsOrFallback(account)` — 对话路径用，拉取失败降级到 `getModels()` 不中断对话。
+- `login()` 成功后主动 `_fetchModels(force)` 持久化。
+- `chat()`/`startCompletion()`/`generateImage()` 对传入的过时模型（不在真实列表）降级到第一个真实模型，避免上游 400。
+
+`/model`（chat.js）与 server chat completion 校验：模型不在当前列表时先 `await provider.refreshModels()` 再校验，仍不存在才拒绝。
 
 ## GLM Provider 数据流
 
-GLM 通过手机号 + 验证码登录，后续请求携带 accessToken。
+GLM 通过 `chatglm_refresh_token` 换取 accessToken，后续请求携带 accessToken（需签名）。
 
 ```
-login → 手机号 → POST /api/v1/sms/send → 验证码 → POST /api/v1/oauth/token → accessToken
-chat  → build payload → POST /api/chatgpt/chat/completions → SSE stream
+login → refreshToken → POST /user-api/user/refresh → accessToken（游客用 /user-api/guest/access）
+chat  → build payload → POST /backend-api/assistant/stream → SSE stream
 ```
 
 关键实现（`src/providers/glm/index.js`）：
-- `sendSms(phone)` — 发送短信验证码
-- `loginWithSms(phone, code)` — 验证码登录获取 accessToken
-- `chat(messages, options)` — 直接调用 chat completions API，无需创建 session
+- `login(credentials.refreshToken)` — 存储 refresh token；也可走游客模式（无 token）
+- `_getAccessToken(account)` — 缓存 + 自动用 refreshToken 刷新 accessToken
+- `chat(messages, options)` — 请求体用固定 `assistant_id`（不发送 model 字段），本地 `model` 仅用于解析 `chat_mode`/`is_networking`
+- 模型选择由 `assistant_id` 决定（硬编码常量），本地 `GLM_MODELS` 静态列表用于展示与开关解析，无公开模型列表 API
 
 ## 扩展系统
 
@@ -175,22 +190,35 @@ src/agent/subagents/
 `src/agent/subagents/manager.js` — `SubagentManager` 类：
 
 - `constructor({ provider, model, workingDir, maxTurns, timeoutMs, onEvent })`
-- `spawnAndWait(task, { profile, tools, maxTurns })` → `{ id, status, result, error }`
+- `spawnAndWait(task, { profile, tools, maxTurns, model })` → `{ id, status, result, error }`
 - `spawnParallel(tasks[], concurrency=3)` — 分批并发执行
 - `cancel(runId)` / `cancelAll()` — AbortController 取消
 - `get(runId)` / `list(status?)` / `cleanup(olderThanMs)` — 状态管理
 - `onEvent(runId, eventType, data)` — 事件：spawned/running/tool_start/tool_blocked/tool_result/completed/failed/cancelled/timed_out
 
-子 Agent 内部是多轮工具调用循环（受 profile.maxTurns 限制），复用主 AI provider 和 model。支持 Qwen（consumeQwenStream）、DeepSeek（streamDeltasWithMessageId）、GLM（consumeGlmStream）三种流消费方式。
+子 Agent 内部是多轮工具调用循环（受 profile.maxTurns 限制），复用主 AI provider 和 model。支持 Qwen（consumeQwenStream）、DeepSeek（streamDeltasWithMessageId）、GLM（consumeGlmStream）三种流消费方式。流消费时过滤元数据 delta（`__messageId`/`__sessionId` 等，不混入 responseText）。
 
 Braille spinner（`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`）在子 Agent 工作时每 80ms 旋转。
+
+### search 子 Agent
+
+`search` profile 专为联网搜索设计，**不注入任何工具调用格式**（`tools: []`）。原因：本环境不提供 `web_search` 工具，若注入 `<invoke>` 格式，AI 会尝试用厂商不识别的格式调用原生搜索。改为靠 provider 原生能力（`enableSearch: true` + 自动推导 search 模型变体）完成，单轮返回固定轻量格式。
+
+- `buildSearchSubAgentPrompt({ workingDir })` — 专用提示词，无 `<invoke>` 段、无工具列表，只定义返回格式：
+  ```
+  <search query="查询词"><hit source="url" info="摘要" /><answer>结论</answer></search>
+  ```
+  失败：`<search-failed reason="..." />`
+- `resolveSearchModel(provider, model)` — 推导 search 模型变体（qwen/deepseek 追加 `-search`，glm 原样）
+- `extractSearchResult(text)` — 从响应提取 `<search>...</search>` 或 `<search-failed />`（容错：未命中则原样返回）
+- `_executeSubAgent` 在 search 模式下单轮短路，不调用 `parseToolCallsFromText`
 
 ### Profile 配置
 
 `src/agent/subagents/config.js` — 配置文件 `~/.chat2cli/subagents.json`：
 
-- 内置 3 个 profile：`default`（5轮/只读）、`explorer`（10轮/搜索增强）、`builder`（15轮/可写）
-- 每 profile 定义：`tools[]`、`allowedShellCommands[]`、`blockUnlistedCommands`、`maxTurns`、`timeoutMs`、`requireApprovalForWrite`
+- 内置 4 个 profile：`default`（5轮/只读）、`explorer`（10轮/搜索增强）、`builder`（15轮/可写）、`search`（联网搜索，无工具，单轮，`promptMode:"search"`/`enableSearch:true`）
+- 每 profile 定义：`tools[]`、`allowedShellCommands[]`、`blockUnlistedCommands`、`maxTurns`、`timeoutMs`、`requireApprovalForWrite`，search profile 额外有 `promptMode`、`enableSearch`
 - 公开 API：`getProfile()`、`listProfiles()`、`saveProfile()`、`deleteProfile()`、`resetConfig()`、`resolveProfile()`
 
 ### Shell 白名单
@@ -204,8 +232,9 @@ Braille spinner（`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`）在子 Agent 工作时每 8
 
 `src/agent/tools/registry.js` 中的 `executeDelegate()`：
 
-- 单任务：`delegate({ task, profile, tools, max_turns })`
-- 并发：`delegate({ tasks: [{ task, profile }, ...] })` — 调用 `manager.spawnParallel(tasks, 3)`
+- 单任务：`delegate({ task, profile, tools, model, max_turns })`
+- 并发：`delegate({ tasks: [{ task, profile, model }, ...] })` — 调用 `manager.spawnParallel(tasks, 3)`
+- `model` 参数：覆盖子 Agent 模型；search profile 未指定时自动推导主模型的 search 变体
 - 依赖 `context.subagentManager`（在 agent-loop 中初始化）
 
 ## 工具审批 & ask 交互

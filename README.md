@@ -13,14 +13,15 @@
 - **OpenAI 兼容 API** - 启动 HTTP 服务，提供 `/v1/models` 和 `/v1/chat/completions` 接口
 - **Function Calling** - API 服务支持 OpenAI 兼容的 `tools`/`tool_choice` 工具调用
 - **AI Agent 模式** - 智能规划 + 工具调用 + 子 Agent 委派 + 用户交互（审批/提问），支持 7 种工具
+- **子 Agent 系统** - 可配置 Profile 的独立子 Agent（default/explorer/builder/search），shell 白名单、超时、并发委托；search 子 Agent 调用 provider 原生联网搜索，不注入工具调用格式
 - **API Key 管理** - 生成分发 API Key，支持自定义 Key 值，每个 Key 可绑定到独立账号
-- **模型切换** - 对话中随时切换模型
+- **模型切换** - 对话中随时切换模型；Qwen 登录后自动拉取真实模型列表并持久化，`/model` 校验时按需刷新
 - **Markdown 渲染** - 支持标题/代码块/表格/列表等，可通过 `--no-markdown` 关闭
 - **批量管理** - 多选删除本地对话和云端会话
 - **子 Agent 系统** - 可配置 Profile 的独立子 Agent，shell 白名单、超时、并发委托
 - **工具审批 & 用户交互** - 危险命令自动触发审批 UI，AI 可通过 ask 工具向用户提问
 - **扩展系统** - 支持 Provider/工具/命令/钩子/路由/提示词注入，见 `examples/extensions/`
-- **终端 UI** - 用户消息透明白色背景块，工具执行绿色背景块
+- **终端 UI** - 用户消息深灰背景块，工具执行绿色背景块，子 Agent 紫色背景块
 - **本地存储** - 数据保存在 `~/.chat2cli/` 目录，纯 JSON 格式
 
 ## 快速开始
@@ -85,11 +86,25 @@ chat2cli chat -m "hello" --model deepseek-reasoner-fast
 |------|------|
 | `/exit` | 保存并退出 |
 | `/clear` | 清空上下文 |
-| `/model <名称>` | 切换模型 |
+| `/model <名称>` | 切换模型（不在列表时自动拉取刷新校验） |
 | `/models` | 列出可用模型 |
+| `/copy [序号/all]` | 复制 AI 回复到剪贴板 |
 | `/help` | 显示帮助 |
 
 **历史记录选择器**：运行 `chat2cli chat`（不带 `-m`）时，会展示所有本地对话和 DeepSeek 云端会话列表。第一行 "新对话"，用 ↑↓ 导航、Enter 确认、Ctrl+C 取消。滚动到底部附近会自动加载更多云端会话。
+
+### `chat2cli models` — 列出/刷新模型列表
+
+```bash
+chat2cli models                   # 列出当前服务商的模型
+chat2cli models list               # 同上
+chat2cli models refresh            # 强制刷新模型列表
+chat2cli models refresh -p qwen    # 指定服务商刷新
+chat2cli models -p openai          # 列出指定服务商的模型
+```
+
+- **Qwen** 支持动态刷新：登录后自动拉取真实模型列表并持久化，`models refresh` 可随时强制更新
+- **DeepSeek / OpenAI / GLM** 使用静态列表，`refresh` 会提示不支持
 
 ### `chat2cli history` — 管理对话历史
 
@@ -222,7 +237,7 @@ Agent 模式使用**单个 AI** 自动规划并执行任务，AI 能调用工具
 | `file-write` | 文件写入 | mode=create 创建 / mode=replace 替换 |
 | `file-search` | 文件搜索 | type=content（grep）或 type=filename（glob） |
 | `todo` | 任务清单管理 | AI 自动维护进度 |
-| `delegate` | **子 Agent 委派** | 将独立子任务委派给受 profile 约束的子 Agent 执行 |
+| `delegate` | **子 Agent 委派** | 将独立子任务委派给受 profile 约束的子 Agent 执行，支持 `model` 参数指定模型 |
 | `ask` | **向用户提问** | 暂停 Agent 循环，收集用户输入后恢复 |
 
 #### 子 Agent 系统
@@ -234,8 +249,22 @@ Agent 模式使用**单个 AI** 自动规划并执行任务，AI 能调用工具
 | `default` | shell/文件只读 | 基础白名单，5 轮，120s 超时 | 简单检查 |
 | `explorer` | shell/文件只读 | 搜索增强（rg, fd, tree），10 轮 | 代码探索 |
 | `builder` | shell/文件读写 | 构建命令（npm, git, cargo），15 轮，5min 超时 | 构建/修改 |
+| `search` | 无（不调工具） | 联网搜索，单轮，120s 超时，自动用主模型的 search 变体 | 查询最新信息 |
 
 子 Agent 的 shell 命令受**白名单 + 危险模式检查**双重保护。可自定义 profile（配置文件 `~/.chat2cli/subagents.json`）。
+
+#### search 子 Agent
+
+`search` profile 专为联网搜索设计，**不注入任何工具调用格式**（避免 AI 误以为有 `web_search` 工具而用厂商不识别的 `<invoke>` 格式调用）。它通过 provider 原生联网搜索能力（Qwen 的 `enableSearch` + `-search` 模型变体、DeepSeek 的 `-search` 模型变体）完成搜索，按轻量 XML 格式返回：
+
+```
+<search query="实际查询词">
+<hit source="来源 URL" info="关键信息摘要" />
+<answer>综合结论</answer>
+</search>
+```
+
+失败时返回 `<search-failed reason="..." />`。可通过 `delegate({ task, profile: "search", model: "可指定搜索模型" })` 调用。
 
 详见 [子 Agent 文档](docs/subagents.md)。
 
@@ -305,30 +334,19 @@ AI 通过 `ask` 工具向用户提问（端口号、方案选择等），支持�
 
 | 模型 ID | 说明 |
 |---------|------|
-| glm-4-flash | GLM-4 Flash |
-| glm-4-plus | GLM-4 Plus |
-| glm-4-air | GLM-4 Air |
+| glm-5.2 | GLM 5.2 |
+| glm-5.1 | GLM 5.1 |
+| glm-5v-turbo | GLM 5V Turbo |
+| glm-4.7 | GLM 4.7 |
+| glm-4.6 | GLM 4.6 |
+| glm-4-flash | GLM 4 Flash |
+| ... | 完整列表见 `chat2cli models -p glm` |
+
+> 说明：GLM 的模型选择由 `assistant_id` 决定，本地 `model` 字符串用于解析思考/联网开关与展示。
 
 ### Qwen (通义千问)
 
-| 模型 ID | 说明 |
-|---------|------|
-| qwen-max | Qwen Max |
-| qwen-plus | Qwen Plus |
-| qwen-turbo | Qwen Turbo |
-| qwen3-max | Qwen3 Max |
-| qwen3-plus | Qwen3 Plus |
-| qwen3-turbo | Qwen3 Turbo |
-| qwen3-coder | Qwen3 Coder |
-| qwen3.5-coder | Qwen3.5 Coder |
-| qwen-coder-plus | Qwen Coder Plus |
-| qwen-coder-turbo | Qwen Coder Turbo |
-| qwen2.5-coder | Qwen2.5 Coder |
-| qwq-plus | QwQ Plus |
-| qwq-plus-latest | QwQ Plus Latest |
-| qwq | QwQ |
-| qwen-vl-max | Qwen VL Max |
-| qwen-vl-plus | Qwen VL Plus |
+Qwen 的模型列表在登录后**动态拉取**并持久化，展示的是上游真实可用模型（如 `qwen3.7-plus`、`qwen3.8-max-preview` 等）及其能力变体（`-thinking`/`-search`/`-image`/`-video` 等）。运行 `chat2cli models -p qwen` 查看完整列表，或 `chat2cli models refresh -p qwen` 强制刷新。
 
 ## 数据存储
 
@@ -354,6 +372,7 @@ cli/
 │   │   ├── history.js            # 历史管理
 │   │   ├── config.js             # 配置管理
 │   │   ├── apikey.js             # API Key 管理
+│   │   ├── models.js             # 模型列表/刷新
 │   │   ├── serve.js              # API 服务入口
 │   │   └── agent.js              # Agent 命令入口
 │   ├── agent/
