@@ -695,18 +695,32 @@ function buildParsedToolCall(name, argumentsText) {
   };
 }
 
+// 匹配 <parameter name="x">value</parameter> 子标签（OpenAI 风格容错），value 跨行到首个 </parameter>
+const PARAM_TAG_PATTERN = /<parameter\s+name\s*=\s*("([^"]*)"|'([^']*)')\s*>([\s\S]*?)<\/parameter>/gi;
+
 function parseMarkupBlock(attrs, inner) {
   const attrParams = parseAllAttributes(attrs);
   const name = (attrParams.name ?? "").trim();
   if (!name) return null;
 
   const { name: _, ...params } = attrParams;
+  const innerStr = inner ?? "";
 
-  // 标签体文本 → content 参数（不 trim，保留首行空行给 file-write 处理）
-  const innerText = inner.trim();
-  if (innerText && !params.content) {
-    params.content = decodeBodyText(inner);
+  // 解析 <parameter name="x">value</parameter> 子标签：属性优先，子标签仅补充属性未提供的参数
+  for (const m of innerStr.matchAll(PARAM_TAG_PATTERN)) {
+    const key = (m[2] ?? m[3] ?? "").trim();
+    if (key && !(key in params)) params[key] = decodeXmlText(m[4] ?? "");
   }
+
+  // 去掉已解析的 <parameter> 子标签后的剩余文本 → content 参数
+  const remaining = innerStr.replace(PARAM_TAG_PATTERN, "").trim();
+  if (remaining && !params.content) {
+    params.content = decodeBodyText(remaining);
+  }
+
+  // 剩余文本仍含 <parameter 残留 → 存在语法错误的子标签（如 <parameter=queries>），视为格式失败
+  // 不当成功调用，原文呈现给用户
+  if (/<parameter/i.test(remaining)) return null;
 
   return buildParsedToolCall(name, JSON.stringify(Object.keys(params).length ? params : {}));
 }
@@ -815,12 +829,11 @@ function consumeCapturedToolBlock(captured, allowedToolNames) {
       const closeEnd = openIndex + pair.open.length + scIdx + 2;
       // 自闭合标签不需要 </invoke>，清除 suffix 中孤立的闭合标签
       const cleanSuffix = captured.slice(closeEnd).replace(/<\/invoke>/gi, "");
-      return {
-        ready: true,
-        prefix: captured.slice(0, openIndex),
-        calls: parseToolCallsFromText(captured.slice(openIndex, closeEnd), allowedToolNames),
-        suffix: cleanSuffix
-      };
+      const blockText = captured.slice(openIndex, closeEnd);
+      const calls = parseToolCallsFromText(blockText, allowedToolNames);
+      // 解析失败（calls 为空）时：invoke 块本身作为文本吐回给用户，避免静默吞掉
+      const prefix = captured.slice(0, openIndex) + (calls.length === 0 ? blockText : "");
+      return { ready: true, prefix, calls, suffix: cleanSuffix };
     }
 
     const closeIndex = lower.lastIndexOf(pair.close);
@@ -829,12 +842,11 @@ function consumeCapturedToolBlock(captured, allowedToolNames) {
     const closeEnd = closeIndex + pair.close.length;
     // 非自闭合：</invoke> 已被消费，suffix 中如有残留 </invoke> 也是孤立的
     const cleanSuffix = captured.slice(closeEnd).replace(/<\/invoke>/gi, "");
-    return {
-      ready: true,
-      prefix: captured.slice(0, openIndex),
-      calls: parseToolCallsFromText(captured.slice(openIndex, closeEnd), allowedToolNames),
-      suffix: cleanSuffix
-    };
+    const blockText = captured.slice(openIndex, closeEnd);
+    const calls = parseToolCallsFromText(blockText, allowedToolNames);
+    // 解析失败时同上：保留 invoke 原文呈现给用户
+    const prefix = captured.slice(0, openIndex) + (calls.length === 0 ? blockText : "");
+    return { ready: true, prefix, calls, suffix: cleanSuffix };
   }
 
   return { ready: true, prefix: captured, calls: [], suffix: "" };

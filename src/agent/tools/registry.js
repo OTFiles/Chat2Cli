@@ -159,7 +159,7 @@ export async function executeToolCall(toolName, params, context = {}) {
     case "ask":
       return executeAsk(params, context);
     default:
-      return { result: { error: `未知工具: ${toolName}` } };
+      return { result: { error: `未知工具 "${toolName}"。可用工具：${TOOL_DEFINITIONS.map(t => t.name).join(", ")}。联网搜索请用 delegate(profile="search")。` } };
   }
 }
 

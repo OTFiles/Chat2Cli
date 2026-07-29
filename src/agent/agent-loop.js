@@ -596,7 +596,9 @@ export async function* runAgentLoop(userInput, context) {
         continue;
       }
 
-      const cleanText = stripToolXml(responseText);
+      // 有成功解析的工具调用时，剥掉 invoke 块（工具单独 render）；
+      // 无调用时（含畸形 invoke）保留完整文本，让用户看到 AI 的原始尝试
+      const cleanText = parsedCalls.length > 0 ? stripToolXml(responseText) : responseText;
       if (cleanText.trim()) {
         appendMessage(composite, {
           role: "assistant", content: cleanText, thinking: thinkingText, source: "main"
