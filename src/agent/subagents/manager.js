@@ -226,6 +226,8 @@ export class SubagentManager {
 
     /** @type {object|null} Braille spinner 引用 */
     this._spinner = null;
+    /** @type {boolean} 并发模式标志：spawnParallel 多任务时为 true，_executeSubAgent 不各自管理 spinner */
+    this._parallelMode = false;
   }
 
   /** 生成运行 ID */
@@ -240,6 +242,17 @@ export class SubagentManager {
     }
   }
 
+  // spinner 启停 helper：并发模式下由 spawnParallel 统一管理，_executeSubAgent 跳过
+  _spinStart(label) {
+    if (this._parallelMode) return;
+    this._spinner = startSpinner(label);
+  }
+  _spinStop(finalText) {
+    if (this._parallelMode) return;
+    this._spinner?.stop(finalText);
+    this._spinner = null;
+  }
+
   /**
    * abort 时的统一处理：区分超时/取消，并保底返回已积累内容。
    * - 超时（run.status 已被超时定时器设为 TIMED_OUT）：保持语义，不覆盖为取消
@@ -249,15 +262,13 @@ export class SubagentManager {
    */
   _handleAbort(run, runId, responseText, isSearch, turns) {
     if (run.status === RUN_STATES.TIMED_OUT) {
-      this._spinner?.stop(`[TIMEOUT] ${run.error || "超时"}`);
-      this._spinner = null;
+      this._spinStop(`[TIMEOUT] ${run.error || "超时"}`);
       const t = (responseText || "").trim();
       if (t) return isSearch ? extractSearchResult(t) : t;
       return `[超时] ${run.error || "子 agent 超时"}`;
     }
     if (run.status === RUN_STATES.RUNNING || run.status === RUN_STATES.PENDING) {
-      this._spinner?.stop("[!] 子Agent已取消");
-      this._spinner = null;
+      this._spinStop("[!] 子Agent已取消");
       run.status = RUN_STATES.CANCELLED;
       run.completedAt = Date.now();
       this._emit(runId, "cancelled", { turns });
@@ -332,7 +343,7 @@ export class SubagentManager {
     const handleAbort = (responseText) => this._handleAbort(run, runId, responseText, isSearch, turns);
 
     // 启动 spinner
-    this._spinner = startSpinner("子Agent工作中...");
+    this._spinStart("子Agent工作中...");
 
     while (turns < maxTurns) {
       let thinkingText = "";
@@ -364,8 +375,7 @@ export class SubagentManager {
         const resp = await this.provider.startCompletion(messages, providerOpts);
 
         if (!resp || !resp.ok) {
-          this._spinner?.stop("[FAIL] 请求失败");
-          this._spinner = null;
+          this._spinStop("[FAIL] 请求失败");
           run.status = RUN_STATES.FAILED;
           run.error = `子 agent 请求失败 (HTTP ${resp?.status || "?"})`;
           run.completedAt = Date.now();
@@ -437,8 +447,7 @@ export class SubagentManager {
 
         // search 模式：单轮，不解析工具调用，直接提取搜索结果
         if (isSearch) {
-          this._spinner?.stop("[OK] 搜索完成");
-          this._spinner = null;
+          this._spinStop("[OK] 搜索完成");
           run.status = RUN_STATES.COMPLETED;
           run.result = extractSearchResult(responseText);
           run.completedAt = Date.now();
@@ -521,8 +530,7 @@ export class SubagentManager {
         }
 
         // 无工具调用 → 子 agent 完成
-        this._spinner?.stop("[OK] 子Agent完成");
-        this._spinner = null;
+        this._spinStop("[OK] 子Agent完成");
         run.status = RUN_STATES.COMPLETED;
         run.result = responseText.trim();
         run.completedAt = Date.now();
@@ -536,8 +544,7 @@ export class SubagentManager {
         return finalResult;
 
       } catch (err) {
-        this._spinner?.stop(`[FAIL] ${err.message.slice(0, 60)}`);
-        this._spinner = null;
+        this._spinStop(`[FAIL] ${err.message.slice(0, 60)}`);
 
         if (signal?.aborted) {
           const r = handleAbort(responseText);
@@ -558,8 +565,7 @@ export class SubagentManager {
     }
 
     // 达到最大轮次
-    this._spinner?.stop("[OK] 已达最大轮次");
-    this._spinner = null;
+    this._spinStop("[OK] 已达最大轮次");
     run.status = RUN_STATES.COMPLETED;
     run.result = `达到最大轮次 (${maxTurns})`;
     run.completedAt = Date.now();
@@ -664,14 +670,29 @@ export class SubagentManager {
       return [r];
     }
 
+    // 并发模式：单一共享 spinner，避免多个 _executeSubAgent 互相覆盖 this._spinner
+    this._parallelMode = true;
+    const total = tasks.length;
+    let done = 0;
+    this._spinner = startSpinner(`并发子Agent 0/${total} 完成`);
+    const updateProgress = () => {
+      done++;
+      this._spinner?.update(`并发子Agent ${done}/${total} 完成`);
+    };
+    // 每个 spawnAndWait 完成后更新进度
+    const wrapped = tasks.map((t) =>
+      this.spawnAndWait(t.task, t).then((r) => { updateProgress(); return r; })
+    );
+
     const results = [];
-    for (let i = 0; i < tasks.length; i += concurrency) {
-      const batch = tasks.slice(i, i + concurrency);
-      const batchResults = await Promise.all(
-        batch.map((t) => this.spawnAndWait(t.task, t))
-      );
+    for (let i = 0; i < wrapped.length; i += concurrency) {
+      const batch = wrapped.slice(i, i + concurrency);
+      const batchResults = await Promise.all(batch);
       results.push(...batchResults);
     }
+    this._spinner?.stop(`[OK] 并发子Agent完成 (${results.filter(r => r.status === "completed").length}/${total} 成功)`);
+    this._spinner = null;
+    this._parallelMode = false;
     return results;
   }
 
