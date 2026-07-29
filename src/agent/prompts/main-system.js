@@ -59,8 +59,17 @@ ${toolSection}
 </invoke>
 \`\`\`
 
+**含特殊字符的 shell 命令（heredoc/含双引号/重定向）：** 命令放标签体，原样放入无需转义
+\`\`\`
+<invoke name="shell">
+python3 << 'EOF'
+print(f"hello {x} > y")
+EOF
+</invoke>
+\`\`\`
+
 示例：
-- \`<invoke name="shell" command="ls -la" />\`
+- \`<invoke name="shell" command="ls -la" />\`  ← 简单命令用属性
 - \`<invoke name="file-read" path="/path/to/file.txt" offset="5" />\`
 - \`<invoke name="file-search" type="filename" pattern="*.py" />\`
 - \`<invoke name="file-write" path="test.txt" mode="create">\nHello, 内容\n</invoke>\`

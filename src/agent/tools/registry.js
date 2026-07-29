@@ -176,7 +176,9 @@ function isDangerous(cmd) {
 }
 
 function executeShell(params, context) {
-  const { command, requires_approval, working_dir, _approved } = params;
+  const { requires_approval, working_dir, _approved } = params;
+  // command 优先；缺失时回退到标签体 content（用于含特殊字符/heredoc 的体形式调用）
+  const command = params.command || params.content;
   if (!command) return { result: { error: "缺少 command 参数" } };
 
   // 审批触发：已批准的操作(_approved)直接放行，否则检查
