@@ -493,6 +493,15 @@ export class SubagentManager {
               subagentProfile: profile
             });
 
+            // 子 agent autonomous，不交互审批：需要审批的工具调用直接拒绝
+            // 避免把 "需要审批" 的 warning 文本当结果寒给 AI
+            if (toolResult.requiresApproval) {
+              const msg = `[拒绝] 工具 ${toolName} 需要用户审批，子 agent 无权执行`;
+              toolResults.push(`--- ${toolName} ---\n${msg}`);
+              this._emit(runId, "tool_blocked", { toolName, reason: "需要审批" });
+              continue;
+            }
+
             const resultText = formatToolResultCompact(toolName, toolResult.result);
             toolResults.push(`--- ${toolName} ---\n${resultText}`);
 

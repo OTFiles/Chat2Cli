@@ -253,6 +253,10 @@ export async function* runAgentLoop(userInput, context) {
   } = context;
 
   // ── 创建子 Agent 管理器（使用主 AI provider）──
+  // 跟踪活跃子 agent：并发时(size>1)静默中间事件，避免交织错乱
+  // 进度靠 spinner + 最终 subagent_result 块汇总
+  const activeSubagents = new Set();
+
   const subagentManager = mainProvider ? new SubagentManager({
     provider: mainProvider,
     model: context.mainModel || null,
@@ -261,23 +265,27 @@ export async function* runAgentLoop(userInput, context) {
     maxTurns: 5,
     shellTimeout,
     onEvent: (runId, eventType, data) => {
-      // 子 agent 内部进度回调 — 在 executeDelegate 的 await 期间
-      // 直接输出到 stdout 提供实时反馈
-      if (eventType === "spawned") {
+      // 活跃跟踪
+      if (eventType === "spawned" || eventType === "running") activeSubagents.add(runId);
+      else if (["completed", "failed", "cancelled", "timed_out"].includes(eventType)) activeSubagents.delete(runId);
+
+      // 并发时(>1个活跃)静默中间事件，只靠最终块；单任务时保留实时反馈
+      const parallel = activeSubagents.size > 1;
+
+      if (eventType === "spawned" && !parallel) {
         process.stdout.write(`  ${chalk.dim("[Sub]")} 子Agent已启动: ${(data.task || "").slice(0, 60)}...\n`);
-      } else if (eventType === "running") {
-        process.stdout.write(`  ${chalk.dim("[..]")} 子Agent工作中...\n`);
-      } else if (eventType === "tool_start") {
+      } else if (eventType === "tool_start" && !parallel) {
         process.stdout.write(`  ${chalk.dim("[>>]")} 子Agent调用: ${data.toolName}\n`);
-      } else if (eventType === "completed") {
+      } else if (eventType === "completed" && !parallel) {
         process.stdout.write(`  ${chalk.dim("[OK]")} 子Agent完成 (${data.turns} 轮, ${data.toolCount || 0} 次工具调用)\n`);
-      } else if (eventType === "failed") {
+      } else if (eventType === "failed" && !parallel) {
         process.stdout.write(`  ${chalk.red("[FAIL]")} 子Agent失败: ${(data.error || "").slice(0, 100)}\n`);
       } else if (eventType === "cancelled") {
         process.stdout.write(`  ${chalk.yellow("[!]")} 子Agent已取消\n`);
       } else if (eventType === "timed_out") {
         process.stdout.write(`  ${chalk.yellow("[TIMEOUT]")} 子Agent超时 (${data.timeoutMs}ms)\n`);
       }
+      // running/tool_result/tool_blocked 并发与单任务均不输出（噪声）
     }
   }) : null;
 
