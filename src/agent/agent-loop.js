@@ -447,10 +447,10 @@ export async function* runAgentLoop(userInput, context) {
 
       const parsedCalls = parseToolCallsFromText(responseText);
 
-      // 检测 AI 用了未兼容的 <parameter> 子标签形式 → 提醒正确格式，不执行
-      // 本系统仅支持属性形式，子标签会导致参数丢失
-      if (/<parameter\b/i.test(responseText)) {
-        const tip = "格式错误：本系统不支持 <parameter> 子标签。请用属性形式：<invoke name=\"工具名\" 参数=\"值\" />。值含双引号时用单引号包裹（如 command='echo \"hi\"'），多行/heredoc 内容用单引号包值或放标签体。";
+      // 检测 AI 用了未兼容的参数子标签形式 → 提醒正确格式，不执行
+      // 枚举 OpenAI/函数调用风格的参数传递子标签（不报任意 <，避免误伤 file-write 写 HTML 内容）
+      if (/<\/?(?:parameter|param|arg|argument|input|field)\b/i.test(responseText)) {
+        const tip = "格式错误：本系统不支持参数子标签（如 <parameter>/<param>/<arg>）。请用属性形式：<invoke name=\"工具名\" 参数=\"值\" />。值含双引号时用单引号包裹（如 command='echo \"hi\"'），多行/heredoc 内容用单引号包值或放标签体。";
         appendMessage(composite, {
           role: "assistant", content: responseText, thinking: thinkingText, source: "main"
         });
