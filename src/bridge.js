@@ -695,32 +695,18 @@ function buildParsedToolCall(name, argumentsText) {
   };
 }
 
-// 匹配 <parameter name="x">value</parameter> 子标签（OpenAI 风格容错），value 跨行到首个 </parameter>
-const PARAM_TAG_PATTERN = /<parameter\s+name\s*=\s*("([^"]*)"|'([^']*)')\s*>([\s\S]*?)<\/parameter>/gi;
-
 function parseMarkupBlock(attrs, inner) {
   const attrParams = parseAllAttributes(attrs);
   const name = (attrParams.name ?? "").trim();
   if (!name) return null;
 
   const { name: _, ...params } = attrParams;
-  const innerStr = inner ?? "";
 
-  // 解析 <parameter name="x">value</parameter> 子标签：属性优先，子标签仅补充属性未提供的参数
-  for (const m of innerStr.matchAll(PARAM_TAG_PATTERN)) {
-    const key = (m[2] ?? m[3] ?? "").trim();
-    if (key && !(key in params)) params[key] = decodeXmlText(m[4] ?? "");
+  // 标签体文本 → content 参数（不 trim，保留首行空行给 file-write 处理）
+  const innerText = inner.trim();
+  if (innerText && !params.content) {
+    params.content = decodeBodyText(inner);
   }
-
-  // 去掉已解析的 <parameter> 子标签后的剩余文本 → content 参数
-  const remaining = innerStr.replace(PARAM_TAG_PATTERN, "").trim();
-  if (remaining && !params.content) {
-    params.content = decodeBodyText(remaining);
-  }
-
-  // 剩余文本仍含 <parameter 残留 → 存在语法错误的子标签（如 <parameter=queries>），视为格式失败
-  // 不当成功调用，原文呈现给用户
-  if (/<parameter/i.test(remaining)) return null;
 
   return buildParsedToolCall(name, JSON.stringify(Object.keys(params).length ? params : {}));
 }

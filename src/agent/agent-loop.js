@@ -447,6 +447,21 @@ export async function* runAgentLoop(userInput, context) {
 
       const parsedCalls = parseToolCallsFromText(responseText);
 
+      // 检测 AI 用了未兼容的 <parameter> 子标签形式 → 提醒正确格式，不执行
+      // 本系统仅支持属性形式，子标签会导致参数丢失
+      if (/<parameter\b/i.test(responseText)) {
+        const tip = "格式错误：本系统不支持 <parameter> 子标签。请用属性形式：<invoke name=\"工具名\" 参数=\"值\" />。值含双引号时用单引号包裹（如 command='echo \"hi\"'），多行/heredoc 内容用单引号包值或放标签体。";
+        appendMessage(composite, {
+          role: "assistant", content: responseText, thinking: thinkingText, source: "main"
+        });
+        appendMessage(composite, {
+          role: "tool", content: tip, source: "tool",
+          toolName: "format_error", toolResult: { error: tip }
+        });
+        yield { type: "info", text: tip };
+        continue;
+      }
+
       // 检查是否有工具调用结果需要继续（即使 responseText 为空）
       // 场景：纯 reasoning 模型可能仅输出 thinking，但仍需处理之前的工具结果
 
