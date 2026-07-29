@@ -217,8 +217,8 @@ Braille spinner（`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`）在子 Agent 工作时每 8
 
 `src/agent/subagents/config.js` — 配置文件 `~/.chat2cli/subagents.json`：
 
-- 内置 4 个 profile：`default`（5轮/只读）、`explorer`（10轮/搜索增强）、`builder`（15轮/可写）、`search`（联网搜索，无工具，单轮，`promptMode:"search"`/`enableSearch:true`）
-- 每 profile 定义：`tools[]`、`allowedShellCommands[]`、`blockUnlistedCommands`、`maxTurns`、`timeoutMs`、`requireApprovalForWrite`，search profile 额外有 `promptMode`、`enableSearch`
+- `default`（5轮/只读）、`explorer`（10轮/搜索增强）、`builder`（15轮/可写）、`search`（联网搜索，无工具，单轮，无整体超时，`promptMode:"search"`/`enableSearch:true`）
+- 每 profile 定义：`tools[]`、`allowedShellCommands[]`、`blockUnlistedCommands`、`maxTurns`、`timeoutMs`（search 为 0=不限时）、`requireApprovalForWrite`，search profile 额外有 `promptMode`、`enableSearch`
 - 公开 API：`getProfile()`、`listProfiles()`、`saveProfile()`、`deleteProfile()`、`resetConfig()`、`resolveProfile()`
 
 ### Shell 白名单
@@ -290,7 +290,7 @@ resolve({ approved: true/false, answer?, modifiedParams? })
 ## 数据存储
 
 所有数据保存在 `~/.chat2cli/data.json`：
-- `config` — defaultProvider, defaultModel
+- `config` — defaultProvider, defaultModel, shellTimeout（0=不限时，默认 120000）, markdown, newChatOnStart 等
 - `providers.deepseek.accounts[]` — 多账号凭据（token, userId, deviceId）
 - `providers.openai` — API Key + baseUrl
 - `providers.qwen.accounts[]` — 多账号凭据（token, email）

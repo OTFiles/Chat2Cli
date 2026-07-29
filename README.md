@@ -140,6 +140,7 @@ chat2cli config set defaultProvider qwen    # 切换默认服务商
 chat2cli config set defaultProvider deepseek
 chat2cli config set defaultProvider openai
 chat2cli config set defaultModel deepseek-chat-fast
+chat2cli config set shellTimeout 0           # 0=不限时，或设毫秒数如 60000
 ```
 
 ### `chat2cli apikey` — API Key 管理
@@ -249,7 +250,7 @@ Agent 模式使用**单个 AI** 自动规划并执行任务，AI 能调用工具
 | `default` | shell/文件只读 | 基础白名单，5 轮，120s 超时 | 简单检查 |
 | `explorer` | shell/文件只读 | 搜索增强（rg, fd, tree），10 轮 | 代码探索 |
 | `builder` | shell/文件读写 | 构建命令（npm, git, cargo），15 轮，5min 超时 | 构建/修改 |
-| `search` | 无（不调工具） | 联网搜索，单轮，120s 超时，自动用主模型的 search 变体 | 查询最新信息 |
+| `search` | 无（不调工具） | 联网搜索，单轮，**无整体超时**，自动用主模型的 search 变体 | 查询最新信息 |
 
 子 Agent 的 shell 命令受**白名单 + 危险模式检查**双重保护。可自定义 profile（配置文件 `~/.chat2cli/subagents.json`）。
 
