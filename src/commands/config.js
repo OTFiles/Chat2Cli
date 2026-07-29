@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { initProviders, getProvider, listProviders } from "../providers/registry.js";
-import { getConfig, setConfigKey, getChatOptions } from "../config.js";
+import { getConfig, setConfigKey, getChatOptions, getShellTimeout } from "../config.js";
 import { getStore, updateStore } from "../storage/store.js";
 import { printSuccess, printError, printInfo, accountLabel } from "../utils/format.js";
 
@@ -28,6 +28,8 @@ async function configShow() {
   process.stdout.write(`  默认模型:   ${chalk.cyan(config.defaultModel)}\n`);
   process.stdout.write(`  新对话:     ${config.newChatOnStart ? chalk.green("每次都开始新对话") : chalk.gray("显示历史记录")}\n`);
   process.stdout.write(`  Markdown:   ${config.markdown !== false ? chalk.green("启用") : chalk.gray("禁用")}\n`);
+  const st = getShellTimeout();
+  process.stdout.write(`  Shell超时:  ${st === 0 ? chalk.green("不限时") : chalk.cyan(st + "ms")}\n`);
   process.stdout.write(`  Thinking:   ${getChatOptions(config.defaultProvider)?.thinkingEnabled !== false ? chalk.green("启用") : chalk.gray("禁用")}\n`);
   process.stdout.write(`  联网搜索:   ${getChatOptions(config.defaultProvider)?.enableSearch ? chalk.green("启用") : chalk.gray("禁用")}\n`);
 
@@ -79,7 +81,7 @@ async function configShow() {
 async function configSet(key, value) {
   if (!key || !value) {
     printError("用法: chat2cli config set <键> <值>");
-    printInfo("可用的键: defaultProvider, defaultModel, newChatOnStart, markdown");
+    printInfo("可用的键: defaultProvider, defaultModel, newChatOnStart, markdown, shellTimeout");
     return;
   }
 
@@ -101,6 +103,18 @@ async function configSet(key, value) {
     }
     setConfigKey(key, boolVal);
     printSuccess(`已设置 ${chalk.bold(key)} = ${chalk.cyan(boolVal)}`);
+    return;
+  }
+
+  // 数字类型的键：shellTimeout（0=不限时）
+  if (key === "shellTimeout") {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) {
+      printError(`请使用非负整数作为值（0 = 不限时，例如 60000 = 60秒）`);
+      return;
+    }
+    setConfigKey(key, n);
+    printSuccess(`已设置 ${chalk.bold(key)} = ${chalk.cyan(n === 0 ? "不限时" : n + "ms")}`);
     return;
   }
 

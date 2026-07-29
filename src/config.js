@@ -54,6 +54,13 @@ export function getCurrentModel() {
   return getConfig().defaultModel;
 }
 
+/** 获取 shell 命令超时（毫秒）。0 = 不限时；默认 120000 */
+export function getShellTimeout() {
+  const v = getConfig()?.shellTimeout;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : 120000;
+}
+
 // ── Agent 配置 ──
 
 export function getAgentConfig() {

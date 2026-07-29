@@ -259,6 +259,7 @@ export async function* runAgentLoop(userInput, context) {
     workingDir,
     timeoutMs: 120000,
     maxTurns: 5,
+    shellTimeout,
     onEvent: (runId, eventType, data) => {
       // 子 agent 内部进度回调 — 在 executeDelegate 的 await 期间
       // 直接输出到 stdout 提供实时反馈

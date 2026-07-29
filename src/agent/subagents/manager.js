@@ -208,7 +208,8 @@ export class SubagentManager {
    * @param {string} opts.model - AI 模型
    * @param {string} opts.workingDir - 工作目录
    * @param {number} [opts.maxTurns=5] - 默认最大轮次（可由 profile 覆盖）
-   * @param {number} [opts.timeoutMs=120000] - 默认超时（可由 profile 覆盖）
+   * @param {number} [opts.timeoutMs=120000] - 默认超时（可由 profile 覆盖；0=不限时）
+   * @param {number} [opts.shellTimeout=120000] - 子 agent 执行 shell 命令的超时（0=不限时）
    * @param {Function} [opts.onEvent] - 事件回调 (runId, eventType, data)
    */
   constructor(opts = {}) {
@@ -217,6 +218,7 @@ export class SubagentManager {
     this.workingDir = opts.workingDir || process.cwd();
     this.defaultMaxTurns = opts.maxTurns ?? 5;
     this.defaultTimeoutMs = opts.timeoutMs ?? 120000;
+    this.shellTimeout = opts.shellTimeout ?? 120000;
     this.onEvent = opts.onEvent || null;
 
     /** @type {Map<string, SubagentRun>} */
@@ -486,7 +488,7 @@ export class SubagentManager {
             const toolResult = await executeToolCall(toolName, params, {
               workingDir: this.workingDir,
               taskList: [],
-              shellTimeout: 60000,
+              shellTimeout: this.shellTimeout,
               isSubAgent: true,
               subagentProfile: profile
             });

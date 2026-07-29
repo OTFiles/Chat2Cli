@@ -2,7 +2,7 @@ import inquirer from "inquirer";
 import chalk from "chalk";
 import { initProviders, getProvider } from "../providers/registry.js";
 import { initExtensions } from "../extensions/index.js";
-import { getConfig, getAgentConfig, setAgentConfigKey } from "../config.js";
+import { getConfig, getAgentConfig, setAgentConfigKey, getShellTimeout } from "../config.js";
 import { printSuccess, printError, printInfo, printTable, formatDate, accountLabel } from "../utils/format.js";
 import { listComposites, createComposite, getComposite, deleteComposite, setModels } from "../agent/storage/composite.js";
 import { agentTui } from "../agent/tui.js";
@@ -228,7 +228,7 @@ export async function runAgent(opts = {}) {
     composite,
     mainModel,
     workingDir: composite.workingDir || process.cwd(),
-    shellTimeout: opts.timeout ?? 120000,
+    shellTimeout: opts.timeout ?? getShellTimeout(),
     maxTokens: opts.maxTokens ?? 1000000,
     hooks: extCtx?.hooks,
     extTuiCommands: await (async () => {

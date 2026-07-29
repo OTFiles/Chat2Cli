@@ -16,7 +16,7 @@ const toolExecutors = new Map();
 export const TOOL_DEFINITIONS = [
   {
     name: "shell",
-    description: "执行 Shell 命令。返回 stdout 和 stderr。危险操作（删除、强制推送等）需设 requires_approval:true。超时 120 秒。",
+    description: "执行 Shell 命令。返回 stdout 和 stderr。危险操作（删除、强制推送等）需设 requires_approval:true。超时由配置 shellTimeout 决定（默认 120 秒，可设为 0 不限时）。",
     parameters: {
       command: { type: "string", required: true, description: "要执行的 shell 命令" },
       requires_approval: { type: "boolean", required: false, description: "是否需要用户确认（危险命令设为 true）" },
