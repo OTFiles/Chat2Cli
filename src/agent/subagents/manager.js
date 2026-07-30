@@ -17,6 +17,7 @@ import { buildPromptFromMessages, parseToolCallsFromText } from "../../bridge.js
 import { executeToolCall, TOOL_DEFINITIONS } from "../tools/registry.js";
 import { getExtensionPromptSections } from "../../extensions/index.js";
 import { resolveProfile } from "./config.js";
+import { getProvider } from "../../providers/registry.js";
 
 // ── Braille spinner ──
 
@@ -204,12 +205,13 @@ const RUN_STATES = {
 export class SubagentManager {
   /**
    * @param {object} opts
-   * @param {object} opts.provider - AI provider
-   * @param {string} opts.model - AI 模型
+   * @param {object} opts.provider - 默认 AI provider（主 agent 的 provider）
+   * @param {string} opts.model - 默认 AI 模型
    * @param {string} opts.workingDir - 工作目录
    * @param {number} [opts.maxTurns=5] - 默认最大轮次（可由 profile 覆盖）
    * @param {number} [opts.timeoutMs=120000] - 默认超时（可由 profile 覆盖；0=不限时）
    * @param {number} [opts.shellTimeout=120000] - 子 agent 执行 shell 命令的超时（0=不限时）
+   * @param {Function} [opts.getProvider] - 可选，按名称获取 provider 实例的函数（用于跨 provider 子 agent）
    * @param {Function} [opts.onEvent] - 事件回调 (runId, eventType, data)
    */
   constructor(opts = {}) {
@@ -219,6 +221,7 @@ export class SubagentManager {
     this.defaultMaxTurns = opts.maxTurns ?? 5;
     this.defaultTimeoutMs = opts.timeoutMs ?? 120000;
     this.shellTimeout = opts.shellTimeout ?? 120000;
+    this.getProvider = opts.getProvider || (() => null);
     this.onEvent = opts.onEvent || null;
 
     /** @type {Map<string, SubagentRun>} */
@@ -327,6 +330,8 @@ export class SubagentManager {
     if (!run) throw new Error(`子 agent ${runId} 不存在`);
 
     const profile = opts.profile || resolveProfile("default");
+    const provider = opts.provider || this.provider;
+    if (!provider) throw new Error("子 agent 需要 provider");
     const allowedTools = profile.tools || ["shell", "file-read", "file-search"];
     const signal = run.abortController?.signal;
     const maxTurns = profile.maxTurns ?? this.defaultMaxTurns;
@@ -362,8 +367,8 @@ export class SubagentManager {
 
       const providerOpts = {
         prompt,
-        model: (opts.model || (isSearch ? resolveSearchModel(this.provider, this.model) : this.model)) || undefined,
-        accountId: this.provider.getDefaultAccount?.()?.id
+        model: (opts.model || (isSearch ? resolveSearchModel(provider, provider.model || this.model) : provider.model || this.model)) || undefined,
+        accountId: provider.getDefaultAccount?.()?.id
       };
       if (isSearch) providerOpts.enableSearch = true;
       if (sessionId) {
@@ -372,7 +377,7 @@ export class SubagentManager {
       }
 
       try {
-        const resp = await this.provider.startCompletion(messages, providerOpts);
+        const resp = await provider.startCompletion(messages, providerOpts);
 
         if (!resp || !resp.ok) {
           this._spinStop("[FAIL] 请求失败");
@@ -398,7 +403,7 @@ export class SubagentManager {
           // 其它 kind（__messageId/__sessionId/__tokenExpired 等）忽略
         };
 
-        if (this.provider.name === "qwen") {
+        if (provider.name === "qwen") {
           const pending = [];
           let done = false, error = null;
           const consumePromise = consumeQwenStream(resp.body, (delta) => {
@@ -415,11 +420,11 @@ export class SubagentManager {
               accumulate(pending[idx++]);
             }
             if (done) break;
-            await new Promise((r) => setTimeout(r, 10));
+            await new Promise((r) => setTimeout(r, 10));;
           }
           if (error) throw error;
           await consumePromise;
-        } else if (this.provider.name === "deepseek") {
+        } else if (provider.name === "deepseek") {
           const { streamDeltasWithMessageId } = await import("../../providers/deepseek/chat.js");
           const stream = streamDeltasWithMessageId(resp);
           for await (const delta of stream.deltas) {
@@ -592,6 +597,18 @@ export class SubagentManager {
     if (opts.tools) profile.tools = opts.tools;
     if (opts.maxTurns) profile.maxTurns = opts.maxTurns;
 
+    // 解析 provider：支持 provider 实例或字符串名称
+    let provider = this.provider; // 默认用主 provider
+    if (opts.provider) {
+      if (typeof opts.provider === "string") {
+        const p = this.getProvider(opts.provider);
+        if (!p) throw new Error(`未找到 provider: ${opts.provider}`);
+        provider = p;
+      } else {
+        provider = opts.provider; // 直接传入实例
+      }
+    }
+
     const runId = this._genRunId();
     const abortController = new AbortController();
     const timeoutMs = profile.timeoutMs ?? this.defaultTimeoutMs;
@@ -629,7 +646,7 @@ export class SubagentManager {
       run.status = RUN_STATES.RUNNING;
       this._emit(runId, "running", { profile: profileName });
 
-      const result = await this._executeSubAgent(runId, task, { profile, model: opts.model });
+      const result = await this._executeSubAgent(runId, task, { profile, model: opts.model, provider });
 
       if (timeoutHandle) clearTimeout(timeoutHandle);
 

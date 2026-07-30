@@ -464,7 +464,8 @@ async function executeDelegate(params, context) {
       profile: t.profile || profileName,
       tools: t.tools || tools || undefined,
       model: t.model || model || undefined,
-      maxTurns: t.max_turns || max_turns || undefined
+      maxTurns: t.max_turns || max_turns || undefined,
+      provider: undefined
     }));
 
     if (context.onSubagentEvent) {
@@ -512,7 +513,8 @@ async function executeDelegate(params, context) {
     profile: profileName,
     tools: tools || undefined,
     model: model || undefined,
-    maxTurns: max_turns || undefined
+    maxTurns: max_turns || undefined,
+    provider: undefined // 子 agent 默认用主 provider，如需指定其它 provider 可传入
   });
 
   return {
