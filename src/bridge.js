@@ -449,14 +449,42 @@ function findInvokeTags(text) {
     let endPos = i;
 
     if (!selfClose) {
-      const closeIdx = lower.indexOf("</invoke>", bodyStart);
-      if (closeIdx === -1) { pos = afterName; continue; }
-      inner = text.slice(bodyStart, closeIdx);
-      endPos = closeIdx + "</invoke>".length;
+      let bodyStart = i;
+      
+      // 检查是否以 CDATA 开头
+      const cdataStart = "<![CDATA[";
+      const hasCdata = text.slice(bodyStart, bodyStart + cdataStart.length) === cdataStart;
+      
+      let inner = "";
+      let endPos = i;
+      
+      if (hasCdata) {
+        // CDATA 模式：先找 ]]>，再找 </invoke>
+        const cdataEnd = text.indexOf("]]>", bodyStart + cdataStart.length);
+        if (cdataEnd === -1) { pos = afterName; continue; }
+        inner = text.slice(bodyStart + cdataStart.length, cdataEnd);
+        
+        // 在 ]]> 之后找真正的 </invoke>
+        const afterCdata = cdataEnd + "]]>".length;
+        const closeIdx = lower.indexOf("</invoke>", afterCdata);
+        if (closeIdx === -1) { pos = afterName; continue; }
+        endPos = closeIdx + "</invoke>".length;
+      } else {
+        // 兼容旧格式：直接找 </invoke>
+        const closeIdx = lower.indexOf("</invoke>", bodyStart);
+        if (closeIdx === -1) { pos = afterName; continue; }
+        inner = text.slice(bodyStart, closeIdx);
+        endPos = closeIdx + "</invoke>".length;
+      }
+
+      results.push({ attrs, inner, start: invokeStart, end: endPos });
+      pos = endPos;
+      continue;
     }
 
-    results.push({ attrs, inner, start: invokeStart, end: endPos });
-    pos = endPos;
+    // 自闭合标签
+    results.push({ attrs, inner: "", start: invokeStart, end: i });
+    pos = i;
   }
 
   return results;

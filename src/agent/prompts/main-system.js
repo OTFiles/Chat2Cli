@@ -51,20 +51,25 @@ ${toolSection}
 <invoke name="工具名" 参数="值" />
 \`\`\`
 
-**带内容体的工具（如文件写入）：** 内容放在标签体内，无需转义
+**带内容体的工具（如文件写入、shell）：** 内容用 <![CDATA[内容]]> 包裹
 \`\`\`
 <invoke name="file-write" path="路径" mode="create">
+<![CDATA[
 第一行
 第二行
+if (a < b) { echo "ok"; }
+]]>
 </invoke>
 \`\`\`
 
-**含特殊字符的 shell 命令（heredoc/含双引号/重定向）：** 命令放标签体，原样放入无需转义
+**含特殊字符的 shell 命令（heredoc/含双引号/重定向/尖括号）：** 同样用 CDATA 包裹
 \`\`\`
 <invoke name="shell">
+<![CDATA[
 python3 << 'EOF'
 print(f"hello {x} > y")
 EOF
+]]>
 </invoke>
 \`\`\`
 
@@ -72,13 +77,15 @@ EOF
 - \`<invoke name="shell" command="ls -la" />\`  ← 简单命令用属性
 - \`<invoke name="file-read" path="/path/to/file.txt" offset="5" />\`
 - \`<invoke name="file-search" type="filename" pattern="*.py" />\`
-- \`<invoke name="file-write" path="test.txt" mode="create">\nHello, 内容\n</invoke>\`
+- \`<invoke name="file-write" path="test.txt" mode="create"><![CDATA[
+Hello, 内容
+]]></invoke>\`
 - \`<invoke name="todo" action="update" tasks='[{"id":"1","content":"xxx","status":"in_progress"}]' />\`
 
 **规则：**
 1. 一次可多次 invoke，每个工具一个标签
 2. 属性值含双引号时用单引号包裹：\`tasks='[{"k":"v"}]'\`
-3. 文件内容必须放标签体，不要塞进属性值
+3. 文件内容、shell 命令必须放标签体，并用 <![CDATA[内容]]> 包裹
 4. 不需要工具时直接文字回复，不输出 XML
 5. 属性值中绝对不能出现未转义的同种引号
 
