@@ -66,11 +66,12 @@ export const TOOL_DEFINITIONS = [
     description: "将子任务委托给子 Agent 执行。子 Agent 是独立的 AI，受 profile 配置约束（工具列表、shell 白名单等）。适合独立、不需上下文的探索/搜索/检查类任务。可并发委托多个子任务。",
     parameters: {
       task: { type: "string", required: true, description: "子任务描述（要具体、可验证）" },
-      tasks: { type: "array", required: false, description: "并发委托多个子任务时的任务数组 [{ task: '描述', profile: 'explorer', model: '可指定模型' }]" },
+      tasks: { type: "array", required: false, description: "并发委托多个子任务时的任务数组 [{ task: '描述', profile: 'explorer', model: '可指定模型', provider: '可指定provider(qwen/deepseek/glm)' }]" },
       profile: { type: "string", required: false, description: "子 Agent 配置名称。内置: default（默认，只读）、explorer（搜索增强）、builder（可写）、search（联网搜索，不调工具）。可自定义。" },
       tools: { type: "array", required: false, description: "覆盖 profile 中的工具列表" },
       model: { type: "string", required: false, description: "覆盖子 Agent 使用的模型。search profile 未指定时自动用主模型的 search 变体（联网搜索）。" },
-      max_turns: { type: "number", required: false, description: "覆盖 profile 中的最大工具调用轮次" }
+      max_turns: { type: "number", required: false, description: "覆盖 profile 中的最大工具调用轮次" },
+      provider: { type: "string", required: false, description: "覆盖子 Agent 使用的 provider（如 qwen/deepseek/glm）。默认用主 provider。" }
     }
   },
   {
@@ -465,7 +466,7 @@ async function executeDelegate(params, context) {
       tools: t.tools || tools || undefined,
       model: t.model || model || undefined,
       maxTurns: t.max_turns || max_turns || undefined,
-      provider: undefined
+      provider: t.provider || undefined
     }));
 
     if (context.onSubagentEvent) {
@@ -514,7 +515,7 @@ async function executeDelegate(params, context) {
     tools: tools || undefined,
     model: model || undefined,
     maxTurns: max_turns || undefined,
-    provider: undefined // 子 agent 默认用主 provider，如需指定其它 provider 可传入
+    provider: params.provider || undefined // 子 agent 可指定其它 provider
   });
 
   return {
