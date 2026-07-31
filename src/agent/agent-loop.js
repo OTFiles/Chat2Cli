@@ -506,7 +506,8 @@ export async function* runAgentLoop(userInput, context) {
             taskList: composite.taskList || [],
             shellTimeout,
             subagentManager,
-            onSubagentEvent
+            onSubagentEvent,
+            mainProvider
           });
 
           // ── 审批 / ask 处理（Promise 桥接）──
@@ -565,7 +566,8 @@ export async function* runAgentLoop(userInput, context) {
                 taskList: composite.taskList || [],
                 shellTimeout,
                 subagentManager,
-                onSubagentEvent
+                onSubagentEvent,
+                mainProvider
               });
             }
           }

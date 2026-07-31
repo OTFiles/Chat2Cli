@@ -71,6 +71,8 @@ export const TOOL_DEFINITIONS = [
       tools: { type: "array", required: false, description: "覆盖 profile 中的工具列表" },
       model: { type: "string", required: false, description: "覆盖子 Agent 使用的模型。search profile 未指定时自动用主模型的 search 变体（联网搜索）。" },
       max_turns: { type: "number", required: false, description: "覆盖 profile 中的最大工具调用轮次" },
+      shell_timeout: { type: "number", required: false, description: "覆盖子 agent shell 命令超时（毫秒，0=不限时）。默认继承主 agent 配置。" },
+      concurrency: { type: "number", required: false, description: "并发子任务数上限。DeepSeek 默认 2，其他 provider 默认 3。可覆盖。" },
       provider: { type: "string", required: false, description: "覆盖子 Agent 使用的 provider（如 qwen/deepseek/glm）。默认用主 provider。" }
     }
   },
@@ -447,7 +449,8 @@ function searchByContent(baseDir, pattern, cwd) {
   }
 }
 
-// ── delegate ──
+
+// ── delegate ───
 
 async function executeDelegate(params, context) {
   const manager = context.subagentManager;
@@ -455,8 +458,14 @@ async function executeDelegate(params, context) {
     return { result: { error: "子 Agent 管理器未初始化，无法委托任务" } };
   }
 
-  const { task, tasks, profile, tools, model, max_turns } = params;
+  const { task, tasks, profile, tools, model, max_turns, shell_timeout, concurrency } = params;
   const profileName = profile || "default";
+
+  // 确定并发数：用户指定 > DeepSeek默认2 > 其他默认3
+  const mainProvider = context.mainProvider;
+  const isDeepSeek = mainProvider?.name === "deepseek";
+  const defaultConcurrency = isDeepSeek ? 2 : 3;
+  const effectiveConcurrency = concurrency ?? defaultConcurrency;
 
   // 并发委托模式
   if (tasks && Array.isArray(tasks) && tasks.length > 0) {
@@ -473,15 +482,12 @@ async function executeDelegate(params, context) {
       context.onSubagentEvent(null, "parallel_start", { count: taskItems.length, tasks: taskItems.map(t => t.task) });
     }
 
-    const results = await manager.spawnParallel(taskItems, 3);
+    const results = await manager.spawnParallel(taskItems, effectiveConcurrency);
 
     const summary = results.map((r, i) => {
       const status = r.status === "completed" ? "[OK]" : r.status === "failed" ? "[FAIL]" : "[..]";
-      return `${status} 子任务 ${i + 1}: ${r.task.slice(0, 80)}\
-结果: ${(r.result || r.error || "无").slice(0, 500)}`;
-    }).join("\
-\
-");
+      return `${status} 子任务 ${i + 1}: ${r.task.slice(0, 80)}\n结果: ${(r.result || r.error || "无").slice(0, 500)}`;
+    }).join("\n\n");
 
     return {
       result: {
@@ -515,26 +521,22 @@ async function executeDelegate(params, context) {
     tools: tools || undefined,
     model: model || undefined,
     maxTurns: max_turns || undefined,
-    provider: params.provider || undefined // 子 agent 可指定其它 provider
+    provider: params.provider || undefined,
+    shellTimeout: shell_timeout ?? context.shellTimeout
   });
 
   return {
     result: {
       success: result.status === "completed",
-      type: "delegate",
-      profile: profileName,
-      task: task.slice(0, 200),
+      type: "delegate_single",
+      id: result.id,
+      task: result.task,
       status: result.status,
-      result: result.result || result.error || "",
-      error: result.error || null
+      result: result.result,
+      error: result.error
     }
   };
 }
-
-/**
- * executeAsk — 向用户提问并等待回复
- * 返回 requiresApproval 让 Agent 循环暂停并等待 TUI 收集用户输入
- */
 function executeAsk(params, context) {
   const { question, options } = params;
   if (!question) {

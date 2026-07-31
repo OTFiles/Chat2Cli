@@ -121,12 +121,14 @@ Hello, 内容
 <invoke name="delegate" task="深入分析" profile="explorer" model="qwen3.7-plus-thinking" />
 \`\`\`
 
-可并发委托多个子任务（每个可单独指定 profile/model）：
+可并发委托多个子任务（每个可单独指定 profile/model/provider/shell_timeout/concurrency）：
 \`\`\`
 <invoke name="delegate" tasks='[{"task":"检查 auth.js","profile":"explorer"},{"task":"构建前端"}]' />
 \`\`\`
 
-## 询问用户
+**并发限制**：DeepSeek 主 provider 时默认并发数 2，其他 provider 默认 3。可用 \`concurrency\` 参数覆盖。
+
+**Shell 超时**：子 agent shell 命令默认继承主 agent 的 \`shellTimeout\` 配置。可用 \`shell_timeout\` 参数覆盖（毫秒，0=不限时）。## 询问用户
 
 当需要用户做出选择时（端口号、确认操作、方案选择），使用 ask 工具：
 \`\`\`
