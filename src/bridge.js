@@ -451,18 +451,22 @@ function findInvokeTags(text) {
     if (!selfClose) {
       let bodyStart = i;
       
-      // 检查是否以 CDATA 开头
+      // 跳过前导空白后检测 CDATA
       const cdataStart = "<![CDATA[";
-      const hasCdata = text.slice(bodyStart, bodyStart + cdataStart.length) === cdataStart;
+      const bodyAfterOpen = text.slice(bodyStart);
+      const trimmedBody = bodyAfterOpen.trimStart();
+      const wsLen = bodyAfterOpen.length - trimmedBody.length;
+      const hasCdata = trimmedBody.startsWith(cdataStart);
       
       let inner = "";
       let endPos = i;
       
       if (hasCdata) {
         // CDATA 模式：先找 ]]>，再找 </invoke>
-        const cdataEnd = text.indexOf("]]>", bodyStart + cdataStart.length);
+        const cdataStartPos = bodyStart + wsLen;
+        const cdataEnd = text.indexOf("]]>", cdataStartPos + cdataStart.length);
         if (cdataEnd === -1) { pos = afterName; continue; }
-        inner = text.slice(bodyStart + cdataStart.length, cdataEnd);
+        inner = text.slice(cdataStartPos + cdataStart.length, cdataEnd);
         
         // 在 ]]> 之后找真正的 </invoke>
         const afterCdata = cdataEnd + "]]>".length;
