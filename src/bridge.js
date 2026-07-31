@@ -451,30 +451,37 @@ function findInvokeTags(text) {
     if (!selfClose) {
       let bodyStart = i;
       
-      // 跳过前导空白后检测 CDATA
+      // 先确定整个 body 的结束位置（找 </invoke>）
+      // 但 <![CDATA[...]]> 内部可能含有 </invoke>，所以需要先处理 CDATA
       const cdataStart = "<![CDATA[";
-      const bodyAfterOpen = text.slice(bodyStart);
-      const trimmedBody = bodyAfterOpen.trimStart();
-      const wsLen = bodyAfterOpen.length - trimmedBody.length;
-      const hasCdata = trimmedBody.startsWith(cdataStart);
+      const bodyText = text.slice(bodyStart);
+      const cdataIdx = bodyText.indexOf(cdataStart);
       
       let inner = "";
       let endPos = i;
       
-      if (hasCdata) {
-        // CDATA 模式：先找 ]]>，再找 </invoke>
-        const cdataStartPos = bodyStart + wsLen;
+      if (cdataIdx >= 0) {
+        // 混合模式：body 包含 CDATA，前后可以有普通文本
+        const cdataStartPos = bodyStart + cdataIdx;
         const cdataEnd = text.indexOf("]]>", cdataStartPos + cdataStart.length);
         if (cdataEnd === -1) { pos = afterName; continue; }
-        inner = text.slice(cdataStartPos + cdataStart.length, cdataEnd);
         
-        // 在 ]]> 之后找真正的 </invoke>
-        const afterCdata = cdataEnd + "]]>".length;
-        const closeIdx = lower.indexOf("</invoke>", afterCdata);
+        // 三部分：前文 + CDATA原文 + 后文
+        const beforeCdata = text.slice(bodyStart, cdataStartPos);
+        const cdataContent = text.slice(cdataStartPos + cdataStart.length, cdataEnd);
+        const afterCdata = text.slice(cdataEnd + "]]>".length);
+        
+        // 在后文中找 </invoke>
+        const afterLower = afterCdata.toLowerCase();
+        const closeIdx = afterLower.indexOf("</invoke>");
         if (closeIdx === -1) { pos = afterName; continue; }
-        endPos = closeIdx + "</invoke>".length;
+        
+        // 拼接最终内容：前文（实体解码） + CDATA（原样） + 后文中 </invoke> 之前的部分（实体解码）
+        const afterText = afterCdata.slice(0, closeIdx);
+        inner = decodeBodyText(beforeCdata) + cdataContent + decodeBodyText(afterText);
+        endPos = bodyStart + bodyText.length - afterCdata.length + closeIdx + "</invoke>".length;
       } else {
-        // 兼容旧格式：直接找 </invoke>
+        // 无 CDATA：兼容旧格式，直接找 </invoke>
         const closeIdx = lower.indexOf("</invoke>", bodyStart);
         if (closeIdx === -1) { pos = afterName; continue; }
         inner = text.slice(bodyStart, closeIdx);
@@ -845,24 +852,40 @@ function consumeCapturedToolBlock(captured, allowedToolNames) {
     const scIdx = findSelfCloseIdx(afterOpen);
     if (scIdx >= 0) {
       const closeEnd = openIndex + pair.open.length + scIdx + 2;
-      // 自闭合标签不需要 </invoke>，清除 suffix 中孤立的闭合标签
       const cleanSuffix = captured.slice(closeEnd).replace(/<\/invoke>/gi, "");
       const blockText = captured.slice(openIndex, closeEnd);
       const calls = parseToolCallsFromText(blockText, allowedToolNames);
-      // 解析失败（calls 为空）时：invoke 块本身作为文本吐回给用户，避免静默吞掉
       const prefix = captured.slice(0, openIndex) + (calls.length === 0 ? blockText : "");
       return { ready: true, prefix, calls, suffix: cleanSuffix };
     }
 
-    const closeIndex = lower.lastIndexOf(pair.close);
+    // 非自闭合：需要处理 CDATA，避免误匹配 CDATA 内含的 </invoke>
+    const bodyStart = openIndex + pair.open.length;
+    const body = captured.slice(bodyStart);
+    const cdataIdx = body.indexOf("<![CDATA[");
+    
+    let closeIndex;
+    if (cdataIdx >= 0) {
+      // CDATA 模式：先找 ]]>，再在 ]]> 之后找 </invoke>
+      const cdataEnd = body.indexOf("]]>", cdataIdx + "<![CDATA[".length);
+      if (cdataEnd < 0) return { ready: false };
+      // 在 ]]> 之后找 </invoke>（大小写不敏感）
+      const afterCdata = body.slice(cdataEnd + "]]>".length);
+      const afterLower = afterCdata.toLowerCase();
+      const relCloseIdx = afterLower.indexOf("</invoke>");
+      if (relCloseIdx < 0) return { ready: false };
+      closeIndex = bodyStart + cdataEnd + "]]>".length + relCloseIdx;
+    } else {
+      // 无 CDATA：直接找 </invoke>
+      closeIndex = lower.lastIndexOf(pair.close);
+    }
+    
     if (closeIndex < openIndex) return { ready: false };
 
     const closeEnd = closeIndex + pair.close.length;
-    // 非自闭合：</invoke> 已被消费，suffix 中如有残留 </invoke> 也是孤立的
     const cleanSuffix = captured.slice(closeEnd).replace(/<\/invoke>/gi, "");
-    const blockText = captured.slice(openIndex, closeEnd);
+    const blockText = captured.slice(openIndex, closeEnd + pair.close.length);
     const calls = parseToolCallsFromText(blockText, allowedToolNames);
-    // 解析失败时同上：保留 invoke 原文呈现给用户
     const prefix = captured.slice(0, openIndex) + (calls.length === 0 ? blockText : "");
     return { ready: true, prefix, calls, suffix: cleanSuffix };
   }
