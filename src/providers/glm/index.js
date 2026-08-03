@@ -560,9 +560,10 @@ export class GlmProvider extends BaseProvider {
     const upstreamModel = resolveUpstreamModel(model);
     const fullPrompt = options.prompt || buildPromptFromMessages(messages);
     // 续聊时只发最后一条用户消息（GLM API 通过 conversation_id 管理上下文）
+    // 若调用方显式提供了 prompt（如 agent 模式的续聊/总结），优先使用它
     const isContinuation = !!(options.sessionId);
     const prompt = isContinuation
-      ? (messages.filter(m => m.role === "user").pop()?.content || fullPrompt)
+      ? (options.prompt || messages.filter(m => m.role === "user").pop()?.content || fullPrompt)
       : fullPrompt;
 
     const assistantId = DEFAULT_ASSISTANT_ID;
@@ -740,10 +741,10 @@ export class GlmProvider extends BaseProvider {
     const isNetworking = resolveNetworking(model, options);
     const upstreamModel = resolveUpstreamModel(model);
     const fullPrompt2 = options.prompt || buildPromptFromMessages(messages);
-    // 续聊时只发最后一条用户消息
+    // 续聊时只发最后一条用户消息；若调用方显式提供了 prompt（如 agent 模式），优先使用它
     const isContinuation2 = !!(options.sessionId);
     const prompt = isContinuation2
-      ? (messages.filter(m => m.role === "user").pop()?.content || fullPrompt2)
+      ? (options.prompt || messages.filter(m => m.role === "user").pop()?.content || fullPrompt2)
       : fullPrompt2;
     const assistantId = DEFAULT_ASSISTANT_ID;
 
@@ -1054,9 +1055,131 @@ export class GlmProvider extends BaseProvider {
 
   /**
    * 获取当前账号的远端会话列表
-   * GLM 网页端似乎没有公开的会话列表 API，返回空列表
+   * GET /backend-api/assistant/conversation/list?assistant_id=&page=&page_size=
    */
   async listSessions(accountId) {
-    return [];
+    const account = accountId ? this.getAccountInfo(accountId) : this.getDefaultAccount();
+    if (!account) return [];
+
+    await this._ensureTokenReady(account);
+    const accessToken = await this._getAccessToken(account);
+
+    const { timestamp, nonce, sign } = buildSign();
+    const deviceId = genDeviceId();
+    const requestId = genRequestId();
+
+    const url = `${GLM_BASE_URL}/backend-api/assistant/conversation/list` +
+      `?assistant_id=${encodeURIComponent(DEFAULT_ASSISTANT_ID)}&page=1&page_size=50`;
+
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: buildHeaders(accessToken, {
+        accept: "application/json, text/plain, */*",
+        referer: "https://chatglm.cn/main/alltoolsdetail",
+        headers: {
+          "X-Device-Id": deviceId,
+          "X-Nonce": nonce,
+          "X-Request-Id": requestId,
+          "X-Sign": sign,
+          "X-Timestamp": timestamp,
+        },
+      }),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw new Error(`获取 GLM 会话列表失败 HTTP ${resp.status}: ${text.slice(0, 200)}`);
+    }
+
+    const data = await resp.json();
+    const list = data.result?.conversation_list;
+    if (!Array.isArray(list)) return [];
+
+    return list
+      .map((c) => ({
+        id: String(c.id || ""),
+        title: c.title || "（无标题）",
+        updatedAt: c.update_time || c.create_time || "",
+        createdAt: c.create_time || "",
+      }))
+      .filter((s) => s.id);
+  }
+
+  /**
+   * 获取会话详情（云端历史消息）
+   * GET /backend-api/assistant/conversation?assistant_id=&conversation_id=
+   * 返回归一化消息 [{role, content, thinking?}]
+   */
+  async getSessionDetail(conversationId, accountId) {
+    const account = accountId ? this.getAccountInfo(accountId) : this.getDefaultAccount();
+    if (!account) throw new Error("未登录 GLM，请先运行 chat2cli login");
+    if (!conversationId) return { messages: [], currentMessageId: null };
+
+    await this._ensureTokenReady(account);
+    const accessToken = await this._getAccessToken(account);
+
+    const { timestamp, nonce, sign } = buildSign();
+    const deviceId = genDeviceId();
+    const requestId = genRequestId();
+
+    const url = `${GLM_BASE_URL}/backend-api/assistant/conversation` +
+      `?assistant_id=${encodeURIComponent(DEFAULT_ASSISTANT_ID)}&conversation_id=${encodeURIComponent(conversationId)}`;
+
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: buildHeaders(accessToken, {
+        accept: "application/json, text/plain, */*",
+        referer: "https://chatglm.cn/main/alltoolsdetail",
+        headers: {
+          "X-Device-Id": deviceId,
+          "X-Nonce": nonce,
+          "X-Request-Id": requestId,
+          "X-Sign": sign,
+          "X-Timestamp": timestamp,
+        },
+      }),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw new Error(`获取 GLM 会话详情失败 HTTP ${resp.status}: ${text.slice(0, 200)}`);
+    }
+
+    const data = await resp.json();
+    const rawMessages = data.result?.messages;
+    if (!Array.isArray(rawMessages)) return { messages: [], currentMessageId: null };
+
+    const messages = [];
+    for (const m of rawMessages) {
+      // 输入（用户消息）；agent 模式会把 SYSTEM 提示词作为首条输入，跳过避免污染续聊
+      const inputText = (m.input?.content || [])
+        .map((c) => c?.text || c?.content || "")
+        .filter(Boolean)
+        .join("");
+      if (inputText.trim() && !/^SYSTEM:/i.test(inputText.trim())) {
+        const role = m.input?.role === "system" ? "system" : "user";
+        messages.push({ role, content: inputText });
+      }
+
+      // 输出（assistant 回复，含 thinking）
+      const parts = m.output?.parts || [];
+      let thinking = "";
+      let response = "";
+      for (const p of parts) {
+        for (const c of p?.content || []) {
+          if (!c || typeof c !== "object") continue;
+          if (c.type === "think") {
+            thinking += c.think || c.text || "";
+          } else if (c.type === "text") {
+            response += c.text || c.content || "";
+          }
+        }
+      }
+      if (response.trim() || thinking.trim()) {
+        messages.push({ role: "assistant", content: response, thinking: thinking || undefined });
+      }
+    }
+
+    return { messages, currentMessageId: null };
   }
 }

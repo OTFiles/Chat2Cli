@@ -109,12 +109,38 @@ async function loadRemoteSessionMessages(provider, account, sessionId, providerN
       const currentMessageId = lastAssistant?.response_id || lastAssistant?.id || raw?.currentId || raw?.currentResponseIds?.[0] || null;
       return { messages, currentMessageId };
     }
+    // GLM
+    if (providerName === "glm") {
+      const result = await provider.getSessionDetail(sessionId, account.id);
+      return result || { messages: [], currentMessageId: null };
+    }
     // DeepSeek
     const result = await provider.fetchMessages(account.id, sessionId);
     return result || { messages: [], currentMessageId: null };
   } catch (err) {
     process.stdout.write(chalk.yellow(`  加载云端消息失败: ${err.message}\n`));
     return { messages: [], currentMessageId: null };
+  }
+}
+
+/**
+ * 加载 GLM 远程会话列表
+ */
+async function loadGlmRemoteSessions(provider, account, allEntries) {
+  try {
+    const sessions = await provider.listSessions(account.id);
+    for (const s of sessions) {
+      if (allEntries.some((e) => e.type === "remote" && e.session.id === s.id)) continue;
+      allEntries.push({
+        type: "remote",
+        providerName: "glm",
+        session: { id: s.id, title: s.title, updatedAt: s.updatedAt },
+        account,
+        sortTime: s.updatedAt || s.createdAt || "",
+      });
+    }
+  } catch (err) {
+    process.stdout.write(chalk.yellow(`  加载 GLM 云端列表失败: ${err.message}\n`));
   }
 }
 
@@ -389,6 +415,13 @@ async function pickConversation(provider, accountId) {
   // Qwen: 一次性加载全部
   if (providerName === "qwen" && account && typeof provider.listSessions === "function") {
     await loadQwenRemoteSessions(provider, account, allEntries);
+    remoteLoaded = true;
+    remoteNoMore = true;
+  }
+
+  // GLM: 一次性加载全部
+  if (providerName === "glm" && account && typeof provider.listSessions === "function") {
+    await loadGlmRemoteSessions(provider, account, allEntries);
     remoteLoaded = true;
     remoteNoMore = true;
   }

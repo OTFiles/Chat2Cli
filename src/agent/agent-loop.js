@@ -1,6 +1,6 @@
 import {
   parseToolCallsFromText, buildPromptFromMessages,
-  consumeQwenStream, createToolSieve
+  consumeQwenStream, consumeGlmStream, createToolSieve
 } from "../bridge.js";
 import { streamDeltasWithMessageId } from "../providers/deepseek/chat.js";
 import { executeToolCall, TOOL_DEFINITIONS } from "./tools/registry.js";
@@ -212,6 +212,37 @@ function createAgentStreamConsumer(provider, resp) {
     const consumePromise = consumeQwenStream(resp.body, (delta) => {
       if (delta.kind === "__messageId") { messageId = messageId || delta.text; return; }
       pending.push({ type: delta.kind, text: delta.text });
+    }).then(() => { done = true; }).catch((err) => { error = err; done = true; });
+
+    return {
+      async *deltas() {
+        let idx = 0;
+        while (!done || idx < pending.length) {
+          while (idx < pending.length) {
+            yield pending[idx++];
+          }
+          if (done) break;
+          // 让出控制权，等待更多 delta 到达
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        if (error) throw error;
+        await consumePromise;
+      },
+      get messageId() { return messageId; }
+    };
+  }
+  if (provider.name === "glm") {
+    // 渐进式流消费（同时捕获 conversation_id 作为 messageId 供续聊使用）
+    const pending = [];
+    let done = false;
+    let error = null;
+    let messageId = null;
+
+    // 在后台消费流，边收边填充 pending
+    const consumePromise = consumeGlmStream(resp.body, (delta) => {
+      pending.push({ type: delta.kind, text: delta.text });
+    }, {
+      onConversationId: (id) => { messageId = messageId || id; }
     }).then(() => { done = true; }).catch((err) => { error = err; done = true; });
 
     return {
@@ -448,9 +479,18 @@ export async function* runAgentLoop(userInput, context) {
       }
 
       if (consumer.messageId) {
-        parentMessageId = consumer.messageId;
-        composite.main.parentMessageId = consumer.messageId;
-        saveComposite(composite);
+        if (mainProvider.name === "glm") {
+          // GLM 的 conversation_id 在流中才返回，续聊时作为 sessionId（conversation_id）使用
+          if (!sessionId) {
+            sessionId = consumer.messageId;
+            composite.main.sessionId = sessionId;
+            saveComposite(composite);
+          }
+        } else {
+          parentMessageId = consumer.messageId;
+          composite.main.parentMessageId = consumer.messageId;
+          saveComposite(composite);
+        }
       }
 
       const parsedCalls = parseToolCallsFromText(responseText);

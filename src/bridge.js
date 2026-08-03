@@ -1368,6 +1368,9 @@ export async function consumeGlmStream(bodyStream, onDelta, options = {}) {
   const deltaDecoder = createGlmDeltaDecoder();
   const onConversationId = options.onConversationId;
   let convIdReported = false;
+  // GLM SSE 事件携带的是累计文本（非增量），需按长度切出增量
+  let lastThinkingLen = 0;
+  let lastTextLen = 0;
 
   const parser = createSseParser(({ data }) => {
     if (!data) return;
@@ -1386,8 +1389,23 @@ export async function consumeGlmStream(bodyStream, onDelta, options = {}) {
     const deltas = deltaDecoder.consume(data);
     if (!deltas || deltas.length === 0) return;
 
+    // 汇总当前事件的全部 thinking / text，再按累计长度切出增量
+    let currentThinking = "";
+    let currentText = "";
     for (const d of deltas) {
-      onDelta(d);
+      if (d.kind === "thinking") currentThinking += d.text;
+      else currentText += d.text;
+    }
+
+    if (currentThinking.length > lastThinkingLen) {
+      const delta = currentThinking.slice(lastThinkingLen);
+      lastThinkingLen = currentThinking.length;
+      onDelta({ kind: "thinking", text: delta });
+    }
+    if (currentText.length > lastTextLen) {
+      const delta = currentText.slice(lastTextLen);
+      lastTextLen = currentText.length;
+      onDelta({ kind: "response", text: delta });
     }
   });
 
